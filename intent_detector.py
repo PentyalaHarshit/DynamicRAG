@@ -4,9 +4,10 @@ Intent Detection (NLP) Module
 Analyses incoming user queries to determine intent type, routing strategy
 (Traditional RAG vs Web RAG), and confidence.
 
-Taxonomy (9 types)
+Taxonomy (11 types)
 ------------------
 WEATHER        — current weather and forecast lookups for a location.
+FINANCE        — current stock prices and market quotes.
 CURRENT_FACT    — who currently holds a role, live prices, incumbent data,
                   recent events.  Always needs web.
 HISTORICAL_FACT — specific past events, wars, treaties, revolutions,
@@ -99,6 +100,13 @@ _CURRENT_FACT_RE = re.compile(
 _WEATHER_RE = re.compile(
     r'\b(weather|forecast|temperature|rain|raining|snow|snowing|humid|humidity|'
     r'wind speed|windy|晴|climate)\b',
+    re.IGNORECASE,
+)
+
+_FINANCE_RE = re.compile(
+    r'\b(stock|stocks|share price|stock price|share value|market price|'
+    r'share market|ticker|quote|trading at|market cap|earnings|dividend|'
+    r'price of shares?)\b',
     re.IGNORECASE,
 )
 
@@ -223,6 +231,7 @@ _FACTOID_RE = re.compile(
 # ---------------------------------------------------------------------------
 _ROUTING: dict = {
     "WEATHER":        (True,  0.98),
+    "FINANCE":        (True,  0.98),
     "CURRENT_FACT":    (True,  0.93),
     "HISTORICAL_FACT": (False, 0.87),  # stable historical knowledge — RAG first
     "FACTOID":         (False, 0.85),  # try RAG first; router escalates if needed
@@ -240,9 +249,10 @@ _ROUTING: dict = {
 # ---------------------------------------------------------------------------
 INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augmented generation (RAG) system.
 
-    Classify the user query into EXACTLY ONE of these 10 intent types:
+    Classify the user query into EXACTLY ONE of these 11 intent types:
 
     WEATHER         — current weather or forecast for a named location.
+    FINANCE         — current stock price or market quote for a company/ticker.
   CURRENT_FACT    — who currently holds a role, live/recent data, incumbent
                     office-holders, current prices or rates.
                     Examples: "Who is president of France?", "What is Bitcoin price?"
@@ -268,12 +278,13 @@ INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augme
 
 Rules:
     - WEATHER takes priority over CURRENT_FACT and CODING for weather lookups.
+    - FINANCE takes priority over CURRENT_FACT and CODING for market lookups.
     - CURRENT_FACT takes priority over BIOGRAPHY for "who is [role]" queries.
   - HISTORICAL_FACT takes priority over FACTOID for named historical events.
   - HISTORICAL_FACT takes priority over BIOGRAPHY when the question is about an event, not a person.
   - DEFINITION takes priority over FACTOID for "what is [concept]" queries.
   - CODING takes priority over REASONING for implementation questions.
-    - needs_web = true for WEATHER and CURRENT_FACT.
+    - needs_web = true for WEATHER, FINANCE, and CURRENT_FACT.
 
 Respond ONLY with valid JSON — no markdown, no explanation:
 {
@@ -308,6 +319,16 @@ def _heuristic_intent(query: str) -> IntentResult | None:
             confidence=conf,
             keywords=words,
             reasoning="Heuristic: query requests live weather information.",
+        )
+
+    if _FINANCE_RE.search(query):
+        needs_web, conf = _ROUTING["FINANCE"]
+        return IntentResult(
+            intent_type="FINANCE",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=words,
+            reasoning="Heuristic: query requests live market information.",
         )
 
     if _CURRENT_FACT_RE.search(query):
@@ -439,6 +460,11 @@ _MATH_MARKERS = frozenset({
     "algebra", "geometry", "proof", "matrix",
 })
 
+_FINANCE_MARKERS = frozenset({
+    "stock", "stocks", "ticker", "quote", "dividend", "earnings",
+    "shares", "trading", "market",
+})
+
 
 def _fallback_intent(query: str) -> IntentResult:
     """
@@ -447,7 +473,9 @@ def _fallback_intent(query: str) -> IntentResult:
     """
     words_set = set(re.findall(r'\w+', query.lower()))
 
-    if words_set & _MATH_MARKERS:
+    if words_set & _FINANCE_MARKERS:
+        itype = "FINANCE"
+    elif words_set & _MATH_MARKERS:
         itype = "MATH"
     elif words_set & _CODING_MARKERS:
         itype = "CODING"
@@ -497,9 +525,10 @@ def detect_intent(query: str) -> IntentResult:
             raise ValueError(f"Unknown intent type from LLM: {itype!r}")
 
         needs_web, _ = _ROUTING[itype]
-        # Respect LLM's needs_web only for CURRENT_FACT; force False for others
+        # Respect LLM's needs_web only for stable intents; specialized live-data
+        # intents must always use their API agent.
         # to prevent unnecessary web calls on stable-knowledge queries.
-        if itype != "CURRENT_FACT":
+        if itype not in {"CURRENT_FACT", "WEATHER", "FINANCE"}:
             needs_web = bool(parsed.get("needs_web", needs_web))
 
         return IntentResult(

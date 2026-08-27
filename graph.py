@@ -86,6 +86,7 @@ from sac_learning import log_sac_transition
 from hybrid_combiner import unified_hybrid_funnel, extract_top3_sentences
 from llm_client import call_llm
 from weather_api import get_weather
+from finance_api import get_stock_quote
 
 
 # ============================================================
@@ -144,6 +145,7 @@ class AgentState(TypedDict, total=False):
     route_meta: Dict[str, Any]
     direct_answer: str
     weather_data: Dict[str, Any]
+    finance_data: Dict[str, Any]
 
     # ── Evidence gate ───────────────────────────────────────
     generation_blocked: bool
@@ -368,6 +370,76 @@ def node_weather(state: AgentState) -> AgentState:
         answer = f"I could not retrieve weather for {location}: {exc}"
         return {
             "route": "weather",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": answer,
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+
+
+def node_finance(state: AgentState) -> AgentState:
+    """Resolve a company or ticker and fetch its current market quote."""
+    question = state["question"]
+    match = re.search(
+        r"(?:stock price|share price|share value|market price|price|quote|ticker)"
+        r"\s+(?:of|for|on)?\s*([A-Za-z][A-Za-z .&'-]{1,40}?)(?:\?|$)",
+        question,
+        re.IGNORECASE,
+    )
+    if match:
+        company = match.group(1).strip()
+    else:
+        company_match = re.search(
+            r"(?:what is|what's|how much is)?\s*"
+            r"([A-Za-z][A-Za-z .&'-]{1,40}?)\s+(?:'s\s+)?"
+            r"(?:stock|share)\s+(?:price|value)(?:\?|$)",
+            question,
+            re.IGNORECASE,
+        )
+        company = company_match.group(1).strip() if company_match else question
+    company = re.sub(r"^(what is|what's|how much is|current)\s+", "", company, flags=re.IGNORECASE)
+
+    try:
+        quote = get_stock_quote(company)
+        change = quote["change"]
+        change_percent = quote["change_percent"]
+        movement = (
+            f" Change: {change:+.2f} ({change_percent:+.2f}%)."
+            if change is not None and change_percent is not None
+            else ""
+        )
+        answer = (
+            f"{quote['company']} ({quote['ticker']}) is trading at "
+            f"{quote['price']:.2f} {quote['currency']}.{movement} "
+            f"Market status: {quote['market_status']}."
+        )
+        return {
+            "route": "finance",
+            "finance_data": quote,
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+    except Exception as exc:
+        answer = f"I could not retrieve a stock quote for {company}: {exc}"
+        return {
+            "route": "finance",
             "direct_answer": answer,
             "final_answer": answer,
             "final_score": 0.0,
@@ -665,6 +737,9 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     if state.get("intent_type") == "WEATHER":
         print("[Graph] Router -> weather (live weather API)")
         return "weather"
+    if state.get("intent_type") == "FINANCE":
+        print("[Graph] Router -> finance (live market API)")
+        return "finance"
     if state.get("needs_web"):
         print("[Graph] Router -> web_rag (intent requires live data)")
         return "web_rag"
@@ -758,6 +833,7 @@ def build_graph() -> StateGraph:
     graph.add_node("web_rag",          node_web_rag)
     graph.add_node("direct_llm",       node_direct_llm)
     graph.add_node("weather",           node_weather)
+    graph.add_node("finance",           node_finance)
     graph.add_node("hybrid_combine",   node_hybrid_combine)
     graph.add_node("evidence_gate",    node_evidence_gate)
     graph.add_node("generate",         node_generate)
@@ -787,6 +863,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("no_evidence",  END)
     graph.add_edge("direct_llm",    END)
     graph.add_edge("weather",       END)
+    graph.add_edge("finance",       END)
 
     # ── Conditional edges ─────────────────────────────────────────────────
     # Router: after memory_check decide traditional_rag or web_rag
@@ -798,6 +875,7 @@ def build_graph() -> StateGraph:
             "web_rag":          "web_rag",
             "direct_llm":       "direct_llm",
             "weather":          "weather",
+            "finance":          "finance",
         },
     )
 
