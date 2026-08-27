@@ -70,6 +70,7 @@ Usage
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Annotated
 from typing_extensions import TypedDict
 
@@ -84,6 +85,7 @@ from verifier import generate_with_self_correction
 from sac_learning import log_sac_transition
 from hybrid_combiner import unified_hybrid_funnel, extract_top3_sentences
 from llm_client import call_llm
+from weather_api import get_weather
 
 
 # ============================================================
@@ -141,6 +143,7 @@ class AgentState(TypedDict, total=False):
     route: str                    # "traditional_rag" | "memory" | "web_rag" | etc.
     route_meta: Dict[str, Any]
     direct_answer: str
+    weather_data: Dict[str, Any]
 
     # ── Evidence gate ───────────────────────────────────────
     generation_blocked: bool
@@ -313,6 +316,68 @@ def node_direct_llm(state: AgentState) -> AgentState:
         "funnel_meta": {},
         "top_sentences": [],
     }
+
+
+def node_weather(state: AgentState) -> AgentState:
+    """Fetch live weather data for the location named in the query."""
+    question = state["question"]
+    location = question
+    match = re.search(
+        r"(?:weather|forecast|temperature|rain|snow|wind)\s+(?:in|at|for)\s+(.+)$",
+        question,
+        re.IGNORECASE,
+    )
+    if match:
+        location = match.group(1)
+    else:
+        location = re.sub(
+            r"\b(what is the|what's the|how is the|current|today's|today|weather|"
+            r"forecast|temperature|rain|snow|wind)\b",
+            "",
+            question,
+            flags=re.IGNORECASE,
+        ).strip(" ?.,")
+
+    try:
+        weather = get_weather(location)
+        answer = (
+            f"Current weather in {weather['location']}: {weather['condition']}, "
+            f"{weather['temperature_c']}°C (feels like {weather['feels_like_c']}°C). "
+            f"Humidity is {weather['humidity_percent']}% and wind speed is "
+            f"{weather['wind_kmh']} km/h."
+        )
+        return {
+            "route": "weather",
+            "weather_data": weather,
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+    except Exception as exc:
+        answer = f"I could not retrieve weather for {location}: {exc}"
+        return {
+            "route": "weather",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": answer,
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
 
 
 def node_hybrid_combine(state: AgentState) -> AgentState:
@@ -597,6 +662,9 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     - confident=True          -> traditional_rag
     - neither                 -> web_rag  (no local knowledge)
     """
+    if state.get("intent_type") == "WEATHER":
+        print("[Graph] Router -> weather (live weather API)")
+        return "weather"
     if state.get("needs_web"):
         print("[Graph] Router -> web_rag (intent requires live data)")
         return "web_rag"
@@ -689,6 +757,7 @@ def build_graph() -> StateGraph:
     graph.add_node("traditional_rag",  node_traditional_rag)
     graph.add_node("web_rag",          node_web_rag)
     graph.add_node("direct_llm",       node_direct_llm)
+    graph.add_node("weather",           node_weather)
     graph.add_node("hybrid_combine",   node_hybrid_combine)
     graph.add_node("evidence_gate",    node_evidence_gate)
     graph.add_node("generate",         node_generate)
@@ -717,6 +786,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("memory_write", END)
     graph.add_edge("no_evidence",  END)
     graph.add_edge("direct_llm",    END)
+    graph.add_edge("weather",       END)
 
     # ── Conditional edges ─────────────────────────────────────────────────
     # Router: after memory_check decide traditional_rag or web_rag
@@ -727,6 +797,7 @@ def build_graph() -> StateGraph:
             "traditional_rag": "traditional_rag",
             "web_rag":          "web_rag",
             "direct_llm":       "direct_llm",
+            "weather":          "weather",
         },
     )
 
