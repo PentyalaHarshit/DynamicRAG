@@ -32,14 +32,14 @@ A production-grade, state-of-the-art **Hierarchical Multi-Stage RAG Pipeline** w
              ▼               ▼               ▼
       Dedicated APIs     Direct LLM       Web RAG
     (Exchange / Weather)               (MCP Coding Tools)
-             │               │               │
-             └───────────────┼───────────────┘
+                             │
+                             ▼
+                 Multi-Stage RAG Funnel
+                (10 → Top-5 → Top-3 Chunks)
+                             │
                              ▼
                     Document Parsing & HTML
                   (Preserves <pre> & <code>)
-                             │
-                             ▼
-                    Chunking + Embedding
                              │
                              ▼
                      QA Cross-Encoder
@@ -75,6 +75,44 @@ A production-grade, state-of-the-art **Hierarchical Multi-Stage RAG Pipeline** w
                                       ▼
                                  SAC Update
 ```
+
+---
+
+## 🔄 Multi-Stage Hierarchical RAG Funnel (10 → Top-5 → Top-3 Chunks)
+
+The system employs a multi-stage progressive funnel to filter and rank retrieved evidence for **General Knowledge**, **Factoids**, **Science**, and **Coding** queries:
+
+```
+       ┌──────────────────────────────────────────────┐
+       │     Candidate Retrieval Pool (10+ Chunks)     │
+       │ Vector Store / BM25 Hybrid / Live Web Search │
+       └──────────────────────┬───────────────────────┘
+                              │
+                              ▼
+       ┌──────────────────────────────────────────────┐
+       │  Stage 1: Embedding Similarity Filter        │
+       │  Filters initial 10+ pool to Top-5 Chunks    │
+       └──────────────────────┬───────────────────────┘
+                              │
+                              ▼
+       ┌──────────────────────────────────────────────┐
+       │  Stage 2: QA Cross-Encoder Reranker          │
+       │  Reranks Top-5 down to Top-3 Best Chunks     │
+       └──────────────────────┬───────────────────────┘
+                              │
+                              ▼
+       ┌──────────────────────────────────────────────┐
+       │  Stage 3: Rich DQN & Answerability Agent    │
+       │  Selects optimal evidence chunk              │
+       │  Passes Hard Evidence Gate & 4D Verifier     │
+       └──────────────────────────────────────────────┘
+```
+
+### Funnel Stages Breakdown:
+1. **Initial Candidate Retrieval Pool (10+ Chunks)**: Fetches an initial candidate pool of 10+ evidence chunks from ChromaDB vector store, BM25 keyword index, or live Web search fallback.
+2. **Stage 1 — Embedding Similarity Filter (Top-5 Chunks)**: Calculates cosine similarity using SentenceTransformers (`all-MiniLM-L6-v2`) to prune noisy documents and isolate the **Top-5** candidate chunks.
+3. **Stage 2 — QA Cross-Encoder Reranker (Top-3 Chunks)**: Evaluates deep question-context interactions using a Cross-Encoder (`ms-marco-MiniLM-L-6-v2`), reranking the Top-5 down to the **Top-3** highest confidence chunks.
+4. **Stage 3 — Rich DQN Selector & Hard Evidence Gate**: Evaluates neural state vectors (similarity score, cross-encoder score, position, entity density) and selects the optimal chunk while enforcing the **Hard Evidence Gate** (`Evidence Gate Passed = True`).
 
 ---
 
@@ -159,17 +197,22 @@ python .\run_regression_tests.py
 python .\main.py "Write a python solution for Leetcode 3 Longest Substring Without Repeating Characters "
 ```
 
-### 2. Live Currency Conversion Query
+### 2. General Knowledge Query
+```powershell
+python .\main.py "Explain the difference between REST API and GraphQL"
+```
+
+### 3. Live Currency Conversion Query
 ```powershell
 python .\main.py "Convert 100 USD to EUR"
 ```
 
-### 3. Live Weather Query
+### 4. Live Weather Query
 ```powershell
 python .\main.py "What is the weather in London right now?"
 ```
 
-### 4. MCP Tools Self-Test
+### 5. MCP Tools Self-Test
 ```powershell
 python .\mcp_coding_rag.py
 ```
