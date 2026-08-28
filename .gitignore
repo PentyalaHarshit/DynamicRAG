@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 venv/
 .env.local
+output.txt
+data/chroma_db/

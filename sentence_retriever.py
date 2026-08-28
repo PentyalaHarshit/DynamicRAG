@@ -9,26 +9,21 @@ from typing import List, Tuple, Dict, Any
 from sentence_transformers import SentenceTransformer, util
 
 import config
+from model_cache import get_embedding_model
 
 _embedder = None
 
 
-def _get_embedder() -> SentenceTransformer:
-    global _embedder
-    if _embedder is None:
-        _embedder = SentenceTransformer(config.EMBEDDING_MODEL)
-    return _embedder
+def _get_embedder():
+    return get_embedding_model()
 
 
 def split_into_sentences(text: str) -> List[str]:
     """Fine-grained chunking into clean individual sentences."""
-    raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    sentences = []
-    for s in raw_sentences:
-        clean = s.strip()
-        if len(clean) > 15:
-            sentences.append(clean)
-    return sentences if sentences else [text.strip()]
+    from generator import split_clean_sentences
+
+    sentences = [s for s in split_clean_sentences(text) if len(s) > 15]
+    return sentences if sentences else ([text.strip()] if text.strip() else [])
 
 
 from answerability_agent import _expected_entity_type, _extract_entities

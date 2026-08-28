@@ -50,6 +50,7 @@ Return Result
 """
 from typing import List, Tuple
 
+import config
 from agents.react_agent import run_react_search
 from agents.search_tool import fetch_page_text, google_search, extract_chunks_from_page
 from agents.crew_validator import analyze_and_validate
@@ -127,7 +128,7 @@ def _build_chunk_pool(
                 all_sources.append(result.link)
 
     # 2. Fetch full article pages concurrently in parallel
-    urls_to_fetch = [r.link for r in results[:6]]
+    urls_to_fetch = [r.link for r in results[:4]]
 
     def _fetch_one(url: str):
         try:
@@ -255,7 +256,7 @@ def run_web_rag(question: str, intent_type: str = "FACTOID") -> dict:
     """
 
     # ── Step 1: ReAct agent -> formulate search query -> fire search ──
-    trace = run_react_search(question)
+    trace = run_react_search(question, intent_type=intent_type)
 
     if not trace.results:
         return {
@@ -395,8 +396,13 @@ def run_web_rag(question: str, intent_type: str = "FACTOID") -> dict:
                 ),
             }
 
-    # ── Step 5: CrewAI validity + relevance sanity check ──
-    check = analyze_and_validate(question, final_context)
+    # ── Step 5: Relevance / credibility sanity check ──────────────────────
+    # Skipped by default (SKIP_CREW_VALIDATOR=1) to save one LLM round-trip.
+    # Re-enable by setting SKIP_CREW_VALIDATOR=0 in the environment.
+    if config.SKIP_CREW_VALIDATOR:
+        check = {"relevant": True, "valid": True, "raw": ["crew validator skipped"]}
+    else:
+        check = analyze_and_validate(question, final_context)
 
     return {
         "success":                   check["relevant"] and check["valid"],

@@ -86,6 +86,21 @@ if __name__ == "__main__":
     print(f"Query:                   {q}")
 
     intent_info = out.get("intent", {})
+
+    # Direct-answer routes (currency, weather, finance, travel) skip RAG entirely
+    if out.get("route") in {"currency", "weather", "finance", "travel"}:
+        print(f"Routing Decision:        {out.get('route')}")
+        if out.get("generation_blocked") or out.get("error"):
+            print(f"\n--- Error ---\n  {out.get('error') or out.get('reason')}")
+        else:
+            print("\nFINAL ANSWER:")
+            ans_out = out.get("final_answer") or "(no answer)"
+            try:
+                print(ans_out)
+            except UnicodeEncodeError:
+                print(ans_out.encode("ascii", "replace").decode("ascii"))
+        print("=" * 70)
+        import sys; sys.exit(0)
     # intent may be an IntentResult dataclass or a plain dict depending on
     # whether generation was reached or the no_evidence path fired.
     if hasattr(intent_info, "intent_type"):
@@ -99,13 +114,41 @@ if __name__ == "__main__":
 
     print(f"Intent Detection:        {itype} (Confidence: {iconf})")
     print(f"  Reasoning:             {ireason}")
+    analysis = out.get("problem_analysis", {})
+    strategy = out.get("strategy", {})
+    if analysis:
+        print(
+            f"Problem Pattern:         {analysis.get('domain')}/"
+            f"{analysis.get('subdomain')} -> {analysis.get('pattern')}"
+        )
+        print(f"Strategy Selection:      {strategy.get('strategy', 'unknown')}")
+    # funnel_meta keys differ between the DQN path and the hybrid combiner path.
+    # Read both and prefer whichever is populated.
+    pool_size   = (fmeta.get("initial_chunks_count")
+                   or fmeta.get("combined_pool_size", 0))
+    emb_scores  = (fmeta.get("top5_embedding_scores")
+                   or fmeta.get("embedding_scores"))
+    ce_scores   = (fmeta.get("top3_cross_encoder_scores")
+                   or fmeta.get("cross_encoder_scores"))
+    dqn_idx     = fmeta.get("dqn_selected_index")
+    gate_passed = fmeta.get("evidence_gate_passed")
+
+    # Hybrid combiner path: show trad/web split
+    trad_count = fmeta.get("trad_rag_count")
+    web_count  = fmeta.get("web_rag_count")
+    pool_label = (
+        f"{pool_size} chunks  (trad={trad_count}, web={web_count})"
+        if trad_count is not None
+        else f"{pool_size} chunks"
+    )
+
     print(f"Routing Decision:        {out.get('route')}")
-    print(f"Initial Extracted Pool:  {fmeta.get('initial_chunks_count', 0)} chunks")
-    print(f"Embedding Sim Filter:    Filtered to Top-5 (Scores: {fmeta.get('top5_embedding_scores')})")
-    print(f"QA Cross-Encoder Rerank: Reranked to Top-3 (Scores: {fmeta.get('top3_cross_encoder_scores')})")
+    print(f"Initial Extracted Pool:  {pool_label}")
+    print(f"Embedding Sim Filter:    Filtered to Top-5 (Scores: {emb_scores})")
+    print(f"QA Cross-Encoder Rerank: Reranked to Top-3 (Scores: {ce_scores})")
     print(
-        f"Rich DQN Selector:       Index {fmeta.get('dqn_selected_index')} selected "
-        f"(Evidence Gate Passed: {fmeta.get('evidence_gate_passed')})"
+        f"Rich DQN Selector:       Index {dqn_idx} selected "
+        f"(Evidence Gate Passed: {gate_passed})"
     )
 
     print("\n--- Rich DQN State Vector (Chosen Chunk) ---")

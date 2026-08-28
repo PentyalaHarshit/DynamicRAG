@@ -27,23 +27,18 @@ import config
 from dqn_selector import select_top1_rich_dqn, RichDQNResult
 from sentence_retriever import fine_grained_sentence_selection
 from answerability_agent import check_answerability
+from model_cache import get_embedding_model, get_cross_encoder
 
 _embedding_model = None
 _cross_encoder_model = None
 
 
 def _get_embedding_model() -> SentenceTransformer:
-    global _embedding_model
-    if _embedding_model is None:
-        _embedding_model = SentenceTransformer(config.EMBEDDING_MODEL)
-    return _embedding_model
+    return get_embedding_model()
 
 
 def _get_cross_encoder() -> CrossEncoder:
-    global _cross_encoder_model
-    if _cross_encoder_model is None:
-        _cross_encoder_model = CrossEncoder(config.RERANKER_MODEL)
-    return _cross_encoder_model
+    return get_cross_encoder()
 
 
 # ---------------------------------------------------------------------------

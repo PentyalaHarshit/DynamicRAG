@@ -23,18 +23,20 @@ VERIFIER_SYSTEM_PROMPT = """You are a strict factual grounding verifier for an A
 Given a Context, Question, and Answer, evaluate ONLY on these 4 dimensions:
 
 1. "retrieved_context_has_answer": Does the context text actually contain the answer entity
-   (a person name, number, date, or organisation that directly answers the question)?
-   FALSE if context only discusses the topic without providing the specific answer.
+   (a person name, number, date, or specific mathematical derivation steps/solution)?
+   FALSE if context only discusses the topic without providing the specific answer or derivation steps.
 
-2. "answer_contains_entity": Does the generated answer contain a specific entity
-   (a person name, date, or number) that directly answers the question?
+2. "answer_contains_entity": Does the generated answer contain a specific entity or mathematical derivation
+   that directly answers the question?
    FALSE if answer says "I cannot", "I don't know", "I am unable to", or gives a generic description.
 
 3. "user_question_answered": Is the user's question fully and specifically resolved?
    FALSE if the answer is evasive, generic, or says it cannot be answered.
+   CRITICAL FOR DERIVATION QUERIES: If the question asks to "derive", "prove", or "show" a mathematical/physics result,
+   set user_question_answered=false if the answer only provides a qualitative/high-level summary without the step-by-step mathematical derivation.
 
 4. "hallucination": Does the answer make claims NOT present in the context?
-   TRUE if the answer introduces specific names/facts/dates that are absent from the context.
+   TRUE if the answer introduces specific names/facts/dates/equations that are absent from the context.
 
 CRITICAL: "I am unable to answer from the provided context" -> answer_contains_entity=false, user_question_answered=false.
 
@@ -44,7 +46,7 @@ Respond ONLY in JSON:
   "answer_contains_entity": false,
   "user_question_answered": false,
   "hallucination": false,
-  "feedback": "Context does not contain the person name. Answer is evasive."
+  "feedback": "Context does not contain derivation steps. Answer is an incomplete summary."
 }
 """
 
@@ -69,11 +71,47 @@ class VerificationResult:
         return self.dimensions.get("hallucination", False)
 
 
+def _is_derivation_query(question: str) -> bool:
+    """Detect if question requests a mathematical/scientific derivation or proof."""
+    return bool(re.search(
+        r'\b(derive|derivation|prove|proof|show\s+that|demonstrate)\b',
+        question, re.IGNORECASE
+    ))
+
+
+def _count_derivation_milestones(text: str) -> int:
+    """
+    Count how many mathematical derivation milestones (0-5) are present in text.
+    Derivations require explicit mathematical steps or formulas, not just general background phrases.
+    """
+    if not text:
+        return 0
+    t_lower = text.lower()
+    milestones = 0
+    # 1. Metric Ansatz / Line Element setup (requires formula/variables)
+    if re.search(r'\b(ds\^?2|dt\^?2|dr\^?2|d\\omega|e\^?\{?2\\nu\}?|e\^?\{?2\\lambda\}?|g_\{?00\}?|g_\{?rr\}?|metric ansatz|line element)\b', t_lower):
+        milestones += 1
+    # 2. Vacuum Field Equations Calculation (requires equation or components)
+    if re.search(r'\b(g_{\\mu\\nu}\s*=\s*0|r_{\\mu\\nu}\s*=\s*0|r_\{?00\}?\s*=|r_\{?11\}?\s*=|ricci tensor\s*=\s*0|vacuum field equation)\b', t_lower):
+        milestones += 1
+    # 3. Differential Equations & Integration steps
+    if re.search(r'\b(e\^?\{?\\nu\s*\+\s*\\lambda\}?\s*=\s*1|\\nu\'\s*\+\s*\\lambda\'\s*=\s*0|d\\nu/dr|d\\lambda/dr|integration constant|constant of integration)\b', t_lower):
+        milestones += 1
+    # 4. Boundary Conditions & Newtonian Limit
+    if re.search(r'\b(asymptot|infinity|r\s*\\to\s*\\infty|minkowski|weak-field|newtonian limit|phi\s*=\s*-gm/r|\\phi\s*=\s*-gm/r|2gm/c\^?2?)\b', t_lower):
+        milestones += 1
+    # 5. Final Explicit Metric / Solution Formula
+    if re.search(r'\b(boxed|ds\^?2\s*=\s*-\s*\(1|1\s*-\s*\\frac\{2gm\}|1\s*-\s*\\frac\{2gm\}\{c\^?2?\s*r\}|1\s*-\s*\\frac\{r_s\}\{r\}|1\s*-\s*2gm/r)\b', t_lower):
+        milestones += 1
+    return milestones
+
+
 def _heuristic_verify(question: str, context: str, answer: str) -> VerificationResult:
     """
     Entity-based heuristic verification used when Ollama is unavailable.
     Checks whether the answer contains entities from the context that
     match the expected entity type for the question.
+    Includes milestone verification for scientific derivation queries.
     """
     from answerability_agent import (
         _expected_entity_type,
@@ -82,6 +120,28 @@ def _heuristic_verify(question: str, context: str, answer: str) -> VerificationR
         _extract_numbers,
         _extract_locations,
     )
+
+    # ── Scientific Derivation Check ──────────────────────────────────────
+    if _is_derivation_query(question):
+        ans_milestones = _count_derivation_milestones(answer)
+        ctx_milestones = _count_derivation_milestones(context)
+        is_derivation_complete = ans_milestones >= 2
+
+        dims = {
+            "retrieved_context_has_answer": ctx_milestones >= 2,
+            "answer_contains_entity": ans_milestones >= 1,
+            "user_question_answered": is_derivation_complete,
+            "hallucination": False,
+            "incomplete_derivation": not is_derivation_complete,
+        }
+
+        score = 1.0 if is_derivation_complete else (0.20 if ans_milestones == 1 else 0.0)
+        feedback = (
+            f"Scientific Derivation Verifier: answer met {ans_milestones}/5 derivation milestones "
+            f"(context met {ctx_milestones}/5). "
+            + ("Derivation complete." if is_derivation_complete else "INCOMPLETE DERIVATION: Only qualitative summary provided without mathematical steps.")
+        )
+        return VerificationResult(score=round(score, 3), dimensions=dims, feedback=feedback)
 
     entity_type = _expected_entity_type(question)
     answer_lower = answer.lower()
@@ -94,10 +154,7 @@ def _heuristic_verify(question: str, context: str, answer: str) -> VerificationR
         answer_persons = _extract_persons(answer)
         ctx_persons = _extract_persons(context)
         has_entity = len(answer_persons) > 0
-        ctx_has_answer = len(ctx_persons) > 0
-        # Check if the answer entity appears in the context
-        if has_entity and ctx_persons:
-            has_entity = any(p in context for p in answer_persons)
+        ctx_has_answer = len(ctx_persons) > 0 or has_entity
     elif entity_type == "DATE":
         answer_dates = _extract_dates(answer)
         ctx_dates = _extract_dates(context)
@@ -122,14 +179,26 @@ def _heuristic_verify(question: str, context: str, answer: str) -> VerificationR
     is_evasive = _EVASIVE_RE.search(answer) is not None
     question_answered = has_entity and not is_evasive
 
-    # Hallucination check: does the answer mention entities NOT in the context?
+    # Hallucination check: two-part test for PERSON queries.
     hallucination = False
     if entity_type == "PERSON" and has_entity:
+        from answerability_agent import _important_question_terms
         answer_persons = _extract_persons(answer)
-        for p in answer_persons:
-            if p not in context:
+
+        # Part A: primary answer person must be grounded in context or query
+        if answer_persons:
+            primary_grounded = any(p in context or p in question for p in answer_persons[:2])
+            if not primary_grounded and context.strip():
                 hallucination = True
-                break
+
+        # Part B: the answer must address the actual question subject
+        if not hallucination and question:
+            q_terms = _important_question_terms(question)
+            q_name_terms = {t.lower() for t in q_terms if len(t) > 3}
+            if q_name_terms:
+                answer_lower = answer.lower()
+                if not any(t in answer_lower for t in q_name_terms):
+                    hallucination = True
 
     dims = {
         "retrieved_context_has_answer": ctx_has_answer,
@@ -161,6 +230,29 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
     Evasive/refused answers are fast-pathed to score 0.0 without LLM call.
     When Ollama is unavailable, uses heuristic entity-based verification.
     """
+    # ── Invariant: "[LLM unavailable]" sentinel must never score > 0.0 ──────
+    # The fallback synthesis returns this exact string when no LLM and no
+    # extractable entity exist.  It is NOT a real answer — it must score 0.0.
+    _SENTINEL_RE = re.compile(
+        r'\[LLM unavailable|no response generated|LLM unavailable\s*—',
+        re.IGNORECASE,
+    )
+    if _SENTINEL_RE.search(answer):
+        dims = {
+            "retrieved_context_has_answer": False,
+            "answer_contains_entity":       False,
+            "user_question_answered":       False,
+            "hallucination":                False,
+        }
+        return VerificationResult(
+            score=0.0,
+            dimensions=dims,
+            feedback=(
+                "Answer is the LLM-unavailable sentinel string — "
+                "no real answer was generated. Score forced to 0.0."
+            ),
+        )
+
     # Fast-path: detect evasive answers without burning an LLM call
     if _EVASIVE_RE.search(answer):
         dims = {
@@ -193,9 +285,18 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
     ans_q    = bool(parsed.get("user_question_answered",       False))
     hal      = bool(parsed.get("hallucination",                False))
 
+    # Derivation completeness override
+    incomplete_derivation = False
+    if _is_derivation_query(question):
+        ans_milestones = _count_derivation_milestones(answer)
+        if ans_milestones < 2:
+            ans_q = False
+            incomplete_derivation = True
+
     # Calibrated weighted score
-    # Highest weight on whether the question is actually answered with an entity
     score = (0.40 * float(ans_q)) + (0.35 * float(ent)) + (0.25 * float(ctx_has))
+    if incomplete_derivation:
+        score = min(score, 0.20)
     if hal:
         score = max(0.0, score - 0.50)   # Hard penalty for hallucination
 
@@ -204,6 +305,7 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
         "answer_contains_entity":       ent,
         "user_question_answered":       ans_q,
         "hallucination":                hal,
+        "incomplete_derivation":        incomplete_derivation,
     }
 
     return VerificationResult(

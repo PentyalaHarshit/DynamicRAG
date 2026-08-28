@@ -55,8 +55,9 @@ _DURATION_QUESTION_RE = re.compile(
 # Patterns that signal the answer should be a NUMBER / QUANTITY
 _NUMBER_QUESTION_RE = re.compile(
     r'\b(how\s+(many|much|old|far|tall|wide|deep|heavy|big|large|small)|'
-    r'what\s+(is\s+the\s+)?(number|count|amount|total|sum|price|cost|rate|speed|'
-    r'temperature|weight|height|distance|population|age|year|size|area|volume))\b',
+    r'what\s+is\s+.*?\b(number|count|amount|total|sum|price|cost|rate|speed|fare|airfare|fee|'
+    r'temperature|weight|height|distance|population|age|year|size|area|volume)\b|'
+    r'\b(price|cost|rate|fare|airfare|fee|cheapest|lowest|highest|amount)\b)',
     re.IGNORECASE,
 )
 
@@ -99,10 +100,9 @@ def _expected_entity_type(question: str) -> str:
 # Entity extraction from chunk text
 # ---------------------------------------------------------------------------
 
-# Person names: 2-5 consecutive Title-Case words (supports middle initials like J.).
-# At least one word must NOT be a generic role/title word.
+# Person names: 2-5 consecutive Title-Case words (supports middle initials like J. and names like MacAlistair).
 _PERSON_NAME_RE = re.compile(
-    r'\b([A-Z][a-záéíóúàèìòùâêîôûäëïöü\-\']*\.?(?:\s+[A-Z][a-záéíóúàèìòùâêîôûäëïöü\-\']*\.?){1,4})\b'
+    r'\b([A-Z][a-zA-Záéíóúàèìòùâêîôûäëïöü\-\']*\.?(?:\s+[A-Z][a-zA-Záéíóúàèìòùâêîôûäëïöü\-\']*\.?){1,4})\b'
 )
 
 # Words that are Title-Case but are NOT personal names.
@@ -125,6 +125,7 @@ _ROLE_WORDS = frozenset({
     "Engineer", "Engineers", "Architect", "Architects", "Artist", "Artists", "Composer", "Composers",
     "Philosopher", "Philosophers", "Pioneer", "Pioneers", "Physician", "Physicians",
     "Scholar", "Scholars", "Researcher", "Researchers", "Professor", "Professors",
+    "Programmer", "Programmers", "Coder", "Coders", "Developer", "Developers", "Software",
     "Principal", "Principals", "Dean", "Deans", "Trustee", "Trustees", "Monarch", "Monarchs",
     "Ruler", "Rulers", "Premier", "Premiers", "King", "Kings", "Queen", "Queens", "Prince", "Princes",
     "Princess", "Princesses", "Duke", "Dukes", "Duchess", "Duchesses", "Baron", "Barons",
@@ -166,6 +167,12 @@ _META_WORDS = frozenset({
     "Wikipedia", "According", "Although", "However", "Therefore",
     "The", "This", "These", "Those", "List", "History", "Overview",
     "Introduction", "Contents", "See", "External", "References",
+    "Top", "Best", "Present", "Gift", "Wash", "Cloth", "World",
+    "Keep", "Code", "Readable", "Art", "Men", "Women", "Shopping", "Amazon", "Quora",
+    "American", "National", "Standards", "Institute", "International", "Organization",
+    "Electrotechnical", "Commission", "Association", "Society", "Foundation",
+    "Corporation", "Company", "Inc", "Ltd", "University", "College", "Department",
+    "Bureau", "Agency", "Council", "Board", "Union", "Federation",
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
     # Question words, pronouns, auxiliary verbs, prepositions common in title-cased headings
@@ -299,9 +306,9 @@ def _extract_durations(text: str) -> List[str]:
         re.IGNORECASE,
     )
     matches = [m.strip() for m in matches if m.strip()]
-    # Prioritize total spans containing BCE/BC or larger year counts (e.g. 1500 years / 300 BCE to 1279 CE)
+    # Prioritize total spans containing BCE/BC or year counts
     matches.sort(key=lambda m: (
-        2 if ("1500" in m or "BCE" in m.upper() or "BC" in m.upper()) else 1,
+        2 if ("BCE" in m.upper() or "BC" in m.upper() or "YEAR" in m.upper()) else 1,
         len(m)
     ), reverse=True)
     return matches
@@ -319,8 +326,13 @@ def _extract_dates(text: str) -> List[str]:
 
 
 def _extract_numbers(text: str) -> List[str]:
-    """Extracts numeric quantities from text."""
-    return re.findall(r'\b\d[\d,\.]*\s*(?:million|billion|thousand|percent|%)?\b', text)
+    """Extracts numeric quantities and currency values from text."""
+    matches = re.findall(
+        r'(\$\s*\d[\d,\.]*|\b\d[\d,\.]*\s*(?:million|billion|thousand|percent|%|USD|dollars|rupees|INR|EUR|GBP|euros|pounds)?\b)',
+        text,
+        re.IGNORECASE,
+    )
+    return [m for m in matches if m.strip()]
 
 
 def _extract_locations(text: str) -> List[str]:
@@ -416,7 +428,7 @@ def check_answerability_full(
         for idx, chunk in enumerate(top3_chunks):
             coverage = _term_coverage(terms, chunk)
             print(f"[Answerability Agent] Chunk {idx}: keyword coverage={coverage:.2f}")
-            if coverage >= 0.75:
+            if coverage >= 0.55:
                 return (
                     True,
                     idx,

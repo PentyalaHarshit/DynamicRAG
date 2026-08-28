@@ -228,18 +228,32 @@ def _extract_main_content(html: str) -> str:
     )
 
     if content_tag:
-        # Within the main content area, gather all paragraph text
-        paragraphs = content_tag.find_all('p')
-        if paragraphs:
-            text = ' '.join(p.get_text(separator=' ') for p in paragraphs)
+        # Within the main content area, gather paragraph and code block elements
+        elements = content_tag.find_all(['p', 'pre', 'code'])
+        if elements:
+            blocks = []
+            for el in elements:
+                t = el.get_text().strip()
+                if el.name in ('pre', 'code') and len(t.split()) >= 2:
+                    blocks.append(f"```python\n{t}\n```")
+                elif t:
+                    blocks.append(t)
+            text = '\n\n'.join(blocks)
         else:
             text = content_tag.get_text(separator=' ')
     else:
-        # Universal fallback: all <p> tags in the document
-        paragraphs = soup.find_all('p')
-        text = ' '.join(p.get_text(separator=' ') for p in paragraphs)
+        # Universal fallback: all <p>, <pre>, <code> tags in the document
+        elements = soup.find_all(['p', 'pre', 'code'])
+        blocks = []
+        for el in elements:
+            t = el.get_text().strip()
+            if el.name in ('pre', 'code') and len(t.split()) >= 2:
+                blocks.append(f"```python\n{t}\n```")
+            elif t:
+                blocks.append(t)
+        text = '\n\n'.join(blocks) if blocks else soup.get_text(separator=' ')
 
-    return re.sub(r'\s+', ' ', text).strip()
+    return re.sub(r'[ \t]+', ' ', text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -373,10 +387,35 @@ def extract_chunks_from_page(
 
 def _duckduckgo_search(query: str, num_results: int = 10) -> List[SearchResult]:
     """
-    Fallback web search using DuckDuckGo HTML search when Google CSE keys are not set.
-    Returns live web search results (news, current facts) with titles, links, and snippets.
+    Fallback web search using DDGS package when Google CSE keys are not set.
+    Returns live web search results (fitness plans, news, current facts) with titles, links, and snippets.
     """
     results: List[SearchResult] = []
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
+
+            with DDGS() as ddgs:
+                raw_results = list(ddgs.text(query, max_results=num_results))
+                for item in raw_results:
+                    title = item.get("title", "")
+                    link = item.get("href", "")
+                    snippet = item.get("body", "")
+                    if title and snippet:
+                        results.append(SearchResult(title=title, link=link, snippet=snippet))
+
+        if results:
+            print(f"[Search Tool] DDGS live web search returned {len(results)} web results for '{query}'")
+            return results[:num_results]
+    except Exception as e:
+        print(f"[Search Tool] DDGS live web search failed: {e}")
+
+    # Fallback to direct HTML parsing if DDGS is unavailable
     try:
         resp = requests.post(
             "https://html.duckduckgo.com/html/",
@@ -402,7 +441,6 @@ def _duckduckgo_search(query: str, num_results: int = 10) -> List[SearchResult]:
                 if a_title:
                     title = a_title.get_text().strip()
                     link = a_title.get("href", "")
-                    # Clean duckduckgo redirect link if present
                     if "/l/?" in link:
                         import urllib.parse
                         parsed = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
@@ -411,10 +449,8 @@ def _duckduckgo_search(query: str, num_results: int = 10) -> List[SearchResult]:
                     snippet = a_snippet.get_text().strip() if a_snippet else ""
                     if title and snippet:
                         results.append(SearchResult(title=title, link=link, snippet=snippet))
-        if results:
-            print(f"[Search Tool] DuckDuckGo fallback: returned {len(results)} live web results")
-    except Exception as e:
-        print(f"[Search Tool] DuckDuckGo fallback failed: {e}")
+    except Exception:
+        pass
 
     return results[:num_results]
 
@@ -456,19 +492,211 @@ def _wikipedia_search(query: str, num_results: int = 10) -> List[SearchResult]:
 
 def _fallback_search(query: str, num_results: int = 10) -> List[SearchResult]:
     """
-    Combined fallback search: tries DuckDuckGo live web search first,
-    then tops up with Wikipedia search if needed.
+    Combined fallback search: tries DDGS live web search first,
+    only using Wikipedia if live web search yields 0 results.
     """
     ddg_results = _duckduckgo_search(query, num_results)
-    if len(ddg_results) >= num_results:
+    if ddg_results:
         return ddg_results
 
-    # Top up with Wikipedia
-    needed = num_results - len(ddg_results)
-    wiki_results = _wikipedia_search(query, needed)
-    seen_links = {r.link for r in ddg_results}
-    combined = ddg_results + [r for r in wiki_results if r.link not in seen_links]
-    return combined[:num_results]
+    return _wikipedia_search(query, num_results)
+
+
+# ---------------------------------------------------------------------------
+# Live currency exchange rate  (no API key needed)
+# ---------------------------------------------------------------------------
+
+# Maps common currency names / symbols to ISO 4217 codes
+_CURRENCY_ALIASES: dict = {
+    # Symbols
+    "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY",
+    "₹": "INR", "₩": "KRW", "₺": "TRY", "₽": "RUB",
+    "฿": "THB",
+    # Full names (lower)
+    "dollar": "USD", "dollars": "USD",
+    "euro": "EUR", "euros": "EUR",
+    "pound": "GBP", "pounds": "GBP", "sterling": "GBP",
+    "yen": "JPY",
+    "rupee": "INR", "rupees": "INR",
+    "yuan": "CNY", "renminbi": "CNY",
+    "won": "KRW",
+    "franc": "CHF", "francs": "CHF",
+    "peso": "MXN", "pesos": "MXN",
+    "ruble": "RUB", "rubles": "RUB",
+    "dirham": "AED",
+    "riyal": "SAR",
+    "baht": "THB",
+    "ringgit": "MYR",
+    "lira": "TRY",
+}
+
+# Regex to pull amount + from-currency + to-currency out of a query string
+# Works on the already-shell-processed string ($ stripped by shell → digit only)
+_CURRENCY_PARSE_RE = re.compile(
+    r"""
+    (?:(?P<symbol>[$€£¥₹₩₺₽฿])\s*)?          # optional leading symbol
+    (?P<amount>\d[\d,\.]*)?                    # optional amount
+    \s*
+    (?P<from_code>[A-Z]{3}|                    # ISO code OR
+        dollar s?|euro s?|pound s?|yen|        # English names
+        rupee s?|yuan|won|franc s?|peso s?|
+        ruble s?|dirham|riyal|baht|ringgit|
+        lira|sterling)
+    \s+
+    (?:in|to|into|=|->)\s+
+    (?P<to_code>[A-Z]{3}|
+        dollar s?|euro s?|pound s?|yen|
+        rupee s?|yuan|won|franc s?|peso s?|
+        ruble s?|dirham|riyal|baht|ringgit|
+        lira|sterling)
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Alternate form: "how many rupees in a dollar" / "how many dollars is 500 rupees"
+_CURRENCY_HOW_MANY_RE = re.compile(
+    r"how\s+many\s+(?P<to_name>\w+)\s+(?:is|are|in|to|per|for)\s+"
+    r"(?:a\s+|an\s+|one\s+)?(?:(?P<amount>\d[\d,\.]*)\s+)?(?P<from_name>\w+)",
+    re.IGNORECASE,
+)
+
+
+def _resolve_currency(token: str, symbol: str = "") -> str:
+    """Convert a currency name, symbol, or ISO code to an uppercase ISO 4217 code."""
+    if not token:
+        token = ""
+    t = token.strip().lower().rstrip("s")   # normalise plural → singular
+    # Direct alias lookup
+    code = _CURRENCY_ALIASES.get(t) or _CURRENCY_ALIASES.get(symbol)
+    if code:
+        return code
+    # If it already looks like an ISO code (3 uppercase letters), use it directly
+    upper = token.strip().upper()
+    if re.fullmatch(r"[A-Z]{3}", upper):
+        return upper
+    return ""
+
+
+def parse_currency_query(query: str) -> tuple[float, str, str]:
+    """
+    Parse a currency query string into (amount, from_code, to_code).
+
+    Returns (0.0, "", "") when parsing fails.
+
+    Examples
+    --------
+    "100 USD in INR"       → (100.0, "USD", "INR")
+    "$50 to euros"         → (50.0,  "USD", "EUR")
+    "convert 200 GBP to JPY" → (200.0, "GBP", "JPY")
+    "how many rupees in a dollar" → (1.0,  "USD", "INR")
+    " USD in INR"          → (1.0,   "USD", "INR")   ← shell stripped the $
+    """
+    # Strip shell-expanded noise: leading spaces, standalone "in INR?"
+    q = query.strip()
+
+    # Try the main pattern first
+    m = _CURRENCY_PARSE_RE.search(q)
+    if m:
+        raw_amount = (m.group("amount") or "1").replace(",", "")
+        amount = float(raw_amount) if raw_amount else 1.0
+        symbol = m.group("symbol") or ""
+        from_code = _resolve_currency(m.group("from_code"), symbol)
+        to_code   = _resolve_currency(m.group("to_code"))
+        if from_code and to_code:
+            return amount, from_code, to_code
+
+    # Try "how many X in a Y"
+    m2 = _CURRENCY_HOW_MANY_RE.search(q)
+    if m2:
+        raw_amount = (m2.group("amount") or "1").replace(",", "")
+        amount = float(raw_amount) if raw_amount else 1.0
+        from_code = _resolve_currency(m2.group("from_name"))
+        to_code   = _resolve_currency(m2.group("to_name"))
+        if from_code and to_code:
+            return amount, from_code, to_code
+
+    return 0.0, "", ""
+
+
+def fetch_live_exchange_rate(
+    from_currency: str,
+    to_currency: str,
+    amount: float = 1.0,
+) -> dict:
+    """
+    Fetches the live exchange rate from the free open.er-api.com endpoint.
+    No API key required for the v6 free tier (1 500 req/month).
+
+    Returns a dict with:
+        rate          — float, the exchange rate (1 unit of from → X units of to)
+        converted     — float, amount * rate
+        from_currency — str, ISO code
+        to_currency   — str, ISO code
+        amount        — float
+        source        — str, attribution
+        answer        — str, human-readable answer sentence
+
+    Raises RuntimeError on HTTP / parse failure (caller should catch).
+    """
+    from_currency = from_currency.upper()
+    to_currency   = to_currency.upper()
+
+    url = f"https://open.er-api.com/v6/latest/{from_currency}"
+    try:
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"Exchange rate API failed: {exc}") from exc
+
+    if data.get("result") != "success":
+        raise RuntimeError(
+            f"Exchange rate API returned non-success: {data.get('result')}"
+        )
+
+    rates = data.get("rates", {})
+    if to_currency not in rates:
+        raise RuntimeError(
+            f"Currency '{to_currency}' not found in rates. "
+            f"Available: {', '.join(list(rates.keys())[:10])} …"
+        )
+
+    rate = float(rates[to_currency])
+    converted = round(amount * rate, 4)
+
+    # Format the converted amount nicely
+    if converted == int(converted):
+        converted_str = f"{int(converted):,}"
+    else:
+        converted_str = f"{converted:,.4f}".rstrip("0").rstrip(".")
+
+    if amount == 1.0:
+        answer = (
+            f"1 {from_currency} = {rate:,.4f} {to_currency}. "
+            f"Exchange rate as of {data.get('time_last_update_utc', 'today')} "
+            f"(source: open.er-api.com)."
+        )
+    else:
+        # Format the input amount
+        if amount == int(amount):
+            amt_str = f"{int(amount):,}"
+        else:
+            amt_str = f"{amount:,g}"
+        answer = (
+            f"{amt_str} {from_currency} = {converted_str} {to_currency}. "
+            f"(Rate: 1 {from_currency} = {rate:,.4f} {to_currency}, "
+            f"as of {data.get('time_last_update_utc', 'today')} — open.er-api.com)"
+        )
+
+    return {
+        "rate":          rate,
+        "converted":     converted,
+        "from_currency": from_currency,
+        "to_currency":   to_currency,
+        "amount":        amount,
+        "source":        "open.er-api.com",
+        "answer":        answer,
+    }
 
 
 # ---------------------------------------------------------------------------

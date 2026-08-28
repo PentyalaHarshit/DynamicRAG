@@ -69,7 +69,47 @@ class IntentResult:
 # (evaluated top-to-bottom; first match wins)
 # ---------------------------------------------------------------------------
 
-# ── CURRENT_FACT ────────────────────────────────────────────────────────────
+# ── CURRENCY (exchange rate / conversion) ───────────────────────────────
+# Catches: "$100 USD in INR", "100 dollars to rupees", "convert EUR to GBP",
+#          "USD to INR rate", "how many rupees in a dollar", etc.
+# Must fire BEFORE _CURRENT_FACT_RE and _MATH_RE so these queries are never
+# misclassified as FACTOID (no web) or MATH (no retrieval needed).
+_CURRENCY_RE = re.compile(
+    r'(?:'
+    # Explicit conversion phrase
+    r'convert\s+.{0,30}\s+(?:to|into)\s+[a-z]'
+    r'|'
+    # Amount + currency code/name pattern: "100 USD in INR", "$50 to euros"
+    r'(?:\$|€|£|¥|₹|₩|₺|₽|฿)?'
+    r'\s*\d[\d,\.]*\s*'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|chf|cny|krw|sgd|hkd|nok|sek|dkk|'
+    r'mxn|brl|rub|try|zar|aed|sar|thb|pln|myr|idr|php|czk|huf|nzd|'
+    r'dollar|dollars|euro|euros|pound|pounds|yen|rupee|rupees|'
+    r'yuan|won|franc|francs|peso|pesos|ruble|rubles|dirham|riyal|baht)'
+    r'\s+(?:in|to|into|=)\s+'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|chf|cny|krw|sgd|hkd|nok|sek|dkk|'
+    r'mxn|brl|rub|try|zar|aed|sar|thb|pln|myr|idr|php|czk|huf|nzd|'
+    r'dollar|dollars|euro|euros|pound|pounds|yen|rupee|rupees|yuan|'
+    r'won|franc|francs|peso|pesos|ruble|rubles|dirham|riyal|baht)'
+    r'|'
+    # Rate queries: "USD to INR", "EUR/USD rate", "exchange rate USD INR"
+    r'(?:exchange\s+rate|forex\s+rate|currency\s+rate)\s+.{0,30}'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|chf|cny|krw|sgd)'
+    r'|'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|chf|cny|krw|sgd|'
+    r'dollar|euro|pound|yen|rupee)\s+'
+    r'(?:to|in|\/)\s+'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|chf|cny|krw|sgd|'
+    r'dollar|euro|pound|yen|rupee)'
+    r'|'
+    # "how many rupees in a dollar", "how many dollars is 500 rupees"
+    r'how\s+many\s+'
+    r'(?:usd|eur|gbp|jpy|inr|cad|aud|dollar|dollars|euro|euros|'
+    r'pound|pounds|yen|rupee|rupees|yuan|won|franc)\s+'
+    r'(?:is|are|in|to|per|for)\b'
+    r')',
+    re.IGNORECASE,
+)
 # Catches:  "who is the president/PM/CEO/head/leader of X"
 #           "who are the current …"
 #           temporal markers: current, now, today, latest, recent, incumbent
@@ -110,13 +150,37 @@ _FINANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_TRAVEL_RE = re.compile(
+    r'\b(flight|flights|airfare|plane ticket|airplane ticket|airline|airlines|'
+    r'hotel|hotels|resort|vacation|itinerary|travel|fly from|flying from|'
+    r'direct flight|nonstop flight|cheapest flight|flight price|flight ticket|'
+    r'flight deal|flight deals|book a flight)\b|'
+    r'\b(from\s+[A-Za-z\s]+\s+to\s+[A-Za-z\s]+)\b',
+    re.IGNORECASE,
+)
+
+_BANKING_GUIDANCE_RE = re.compile(
+    r'\b(credit\s+card|debit\s+card|bank\s+account|interest\s+rate|'
+    r'mortgage|loan|credit\s+score|credit\s+limit|pin\s+number)\b',
+    re.IGNORECASE,
+)
+
 # ── MATH ────────────────────────────────────────────────────────────────────
 _MATH_RE = re.compile(
     r'\b(calculate|compute|solve|integrate|differentiate|derivative|'
+    r'derive\s+the|derivation\s+of|derive\s+an?\s+expression|'
+    r'show\s+that|prove\s+that|proof\s+of|demonstrate\s+that|'
+    r'schwarzschild|riemann|tensor|metric|geodesic|lagrangian|hamiltonian|'
+    r'fourier|laplace|eigenvalue|eigenvector|curl|divergence|gradient|'
     r'equation|formula|arithmetic|algebra|geometry|trigonometry|'
-    r'probability|statistics|matrix|vector|eigenvalue|proof|'
+    r'probability|statistics|matrix|vector|proof|'
+    r'average|mean|sum\s+(?:of|for)|'
+    r'percentage|percent|\d+(?:\.\d+)?\s*%|'
+    r'relativity|relativistic|spacecraft.*\d+(?:\.\d+)?\s*c\b|speed\s+of\s+light|'
+    r'[∫]\s*[a-zA-Z0-9]|'
     r'what\s+is\s+\d[\d\s\+\-\*/\^]*=|'
-    r'\d+\s*[\+\-\*\/\^]\s*\d+)\b',
+    r'\d+\s*[\+\-\*\/\^]\s*\d+|'
+    r'(?:average|mean|sum)\s+(?:of|for)\s+\d+(?:\s*,\s*\d+){1,})',
     re.IGNORECASE,
 )
 
@@ -125,7 +189,7 @@ _CODING_RE = re.compile(
     r'\b(code|program|script|function|class|method|algorithm|implement|debug|'
     r'error\s+in\s+(my\s+)?(code|script|program)|'
     r'write\s+(a\s+)?(function|class|script|program|code)|'
-    r'how\s+to\s+(implement|code|write|use|call|import|install)|'
+    r'how\s+to\s+(implement|code|write|call|import|install)|'
     r'python|javascript|typescript|java|c\+\+|rust|golang|sql|bash|'
     r'api|library|framework|package|module|syntax|runtime|compile|'
     r'stack\s+overflow|git\s+|docker|kubernetes)\b',
@@ -143,10 +207,18 @@ _COMPARISON_RE = re.compile(
 
 # ── DEFINITION ───────────────────────────────────────────────────────────────
 _DEFINITION_RE = re.compile(
-    r'\b(what\s+is\s+(a\s+|an\s+|the\s+)?(?!price|rate|cost|value)'
+    r'\b(what\s+is\s+(a\s+|an\s+|the\s+)?(?!price|rate|cost|value|cheapest|lowest|flight|ticket|hotel|fare|airfare|travel)'
     r'|define\s+|definition\s+of|what\s+does\s+\w+\s+mean|'
     r'meaning\s+of|explain\s+(what|the\s+concept)|'
     r'what\s+are\s+(the\s+)?(types|kinds|categories|examples)\s+of)\b',
+    re.IGNORECASE,
+)
+
+# ── HEALTH_FITNESS ───────────────────────────────────────────────────────────
+_HEALTH_FITNESS_RE = re.compile(
+    r'\b(workout|workout\s+plan|workout\s+routine|exercise|exercise\s+plan|'
+    r'fitness|fitness\s+plan|diet\s+plan|gym\s+routine|training\s+plan|'
+    r'split\s+routine|push\s+pull\s+legs|full\s+body\s+workout)\b',
     re.IGNORECASE,
 )
 
@@ -230,15 +302,17 @@ _FACTOID_RE = re.compile(
 # Routing table: intent_type -> (needs_web, confidence)
 # ---------------------------------------------------------------------------
 _ROUTING: dict = {
-    "WEATHER":        (True,  0.98),
-    "FINANCE":        (True,  0.98),
+    "CURRENCY":        (True,  0.99),  # live exchange rate — always web
+    "WEATHER":         (True,  0.98),
+    "FINANCE":         (True,  0.98),
+    "TRAVEL":          (True,  0.98),  # live flight/travel search — always web
     "CURRENT_FACT":    (True,  0.93),
     "HISTORICAL_FACT": (False, 0.87),  # stable historical knowledge — RAG first
     "FACTOID":         (False, 0.85),  # try RAG first; router escalates if needed
     "BIOGRAPHY":       (False, 0.85),
     "DEFINITION":      (False, 0.88),
     "COMPARISON":      (False, 0.82),
-    "CODING":          (False, 0.90),
+    "CODING":          (True,  0.95),
     "MATH":            (False, 0.92),
     "REASONING":       (False, 0.80),
 }
@@ -249,10 +323,14 @@ _ROUTING: dict = {
 # ---------------------------------------------------------------------------
 INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augmented generation (RAG) system.
 
-    Classify the user query into EXACTLY ONE of these 11 intent types:
+    Classify the user query into EXACTLY ONE of these 13 intent types:
 
+    CURRENCY        — currency conversion or live exchange rate queries.
+                       Examples: "100 USD in INR", "convert 50 EUR to GBP", "USD to INR rate"
     WEATHER         — current weather or forecast for a named location.
     FINANCE         — current stock price or market quote for a company/ticker.
+    TRAVEL          — flight availability, ticket prices, airline options, hotel bookings, travel itineraries.
+                       Examples: "Is there flight from Dallas to Hyderabad on 2nd september?", "cheapest flights to Tokyo"
   CURRENT_FACT    — who currently holds a role, live/recent data, incumbent
                     office-holders, current prices or rates.
                     Examples: "Who is president of France?", "What is Bitcoin price?"
@@ -279,12 +357,13 @@ INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augme
 Rules:
     - WEATHER takes priority over CURRENT_FACT and CODING for weather lookups.
     - FINANCE takes priority over CURRENT_FACT and CODING for market lookups.
+    - TRAVEL takes priority over DEFINITION, FACTOID, and CURRENT_FACT for travel/flight lookups.
     - CURRENT_FACT takes priority over BIOGRAPHY for "who is [role]" queries.
   - HISTORICAL_FACT takes priority over FACTOID for named historical events.
   - HISTORICAL_FACT takes priority over BIOGRAPHY when the question is about an event, not a person.
   - DEFINITION takes priority over FACTOID for "what is [concept]" queries.
   - CODING takes priority over REASONING for implementation questions.
-    - needs_web = true for WEATHER, FINANCE, and CURRENT_FACT.
+    - needs_web = true for WEATHER, FINANCE, CURRENCY, TRAVEL, and CURRENT_FACT.
 
 Respond ONLY with valid JSON — no markdown, no explanation:
 {
@@ -311,6 +390,16 @@ def _heuristic_intent(query: str) -> IntentResult | None:
     """
     words = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 2]
 
+    if _CURRENCY_RE.search(query):
+        needs_web, conf = _ROUTING["CURRENCY"]
+        return IntentResult(
+            intent_type="CURRENCY",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=words,
+            reasoning="Heuristic: query is a currency conversion or exchange rate lookup.",
+        )
+
     if _WEATHER_RE.search(query):
         needs_web, conf = _ROUTING["WEATHER"]
         return IntentResult(
@@ -329,6 +418,16 @@ def _heuristic_intent(query: str) -> IntentResult | None:
             confidence=conf,
             keywords=words,
             reasoning="Heuristic: query requests live market information.",
+        )
+
+    if _TRAVEL_RE.search(query):
+        needs_web, conf = _ROUTING["TRAVEL"]
+        return IntentResult(
+            intent_type="TRAVEL",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=words,
+            reasoning="Heuristic: query requests travel, flight, or hotel information.",
         )
 
     if _CURRENT_FACT_RE.search(query):
@@ -352,6 +451,15 @@ def _heuristic_intent(query: str) -> IntentResult | None:
             confidence=conf,
             keywords=words,
             reasoning="Heuristic: query contains mathematical / numerical pattern.",
+        )
+
+    if _HEALTH_FITNESS_RE.search(query):
+        return IntentResult(
+            intent_type="FACTOID",
+            needs_web=True,
+            confidence=0.95,
+            keywords=words,
+            reasoning="Heuristic: query is a health/fitness workout routine lookup — requires live web search.",
         )
 
     if _CODING_RE.search(query):
@@ -457,7 +565,10 @@ _CODING_MARKERS = frozenset({
 
 _MATH_MARKERS = frozenset({
     "calculate", "compute", "solve", "equation", "integral", "derivative",
-    "algebra", "geometry", "proof", "matrix",
+    "algebra", "geometry", "proof", "matrix", "spacecraft", "relativity",
+    "relativistic", "gamma", "lorentz", "derive", "derivation", "tensor",
+    "metric", "geodesic", "schwarzschild", "lagrangian", "hamiltonian",
+    "fourier", "laplace", "eigenvector",
 })
 
 _FINANCE_MARKERS = frozenset({
@@ -525,13 +636,10 @@ def detect_intent(query: str) -> IntentResult:
             raise ValueError(f"Unknown intent type from LLM: {itype!r}")
 
         needs_web, _ = _ROUTING[itype]
-        # Respect LLM's needs_web only for stable intents; specialized live-data
-        # intents must always use their API agent.
-        # to prevent unnecessary web calls on stable-knowledge queries.
-        if itype not in {"CURRENT_FACT", "WEATHER", "FINANCE"}:
+        if itype not in {"CURRENT_FACT", "WEATHER", "FINANCE", "CURRENCY", "TRAVEL"}:
             needs_web = bool(parsed.get("needs_web", needs_web))
 
-        return IntentResult(
+        result = IntentResult(
             intent_type=itype,
             needs_web=needs_web,
             confidence=float(parsed.get("confidence", 0.80)),
@@ -541,4 +649,18 @@ def detect_intent(query: str) -> IntentResult:
 
     except Exception as exc:
         print(f"[Intent Detector] LLM classification failed ({exc}). Using keyword fallback.")
-        return _fallback_intent(query)
+        result = _fallback_intent(query)
+
+    # ── Strict Guard: Non-coding queries can NEVER be classified as CODING ──
+    _CODING_EXPLICIT_RE = re.compile(
+        r'\b(code|python|javascript|js|typescript|ts|java|c\+\+|cpp|c#|golang|rust|'
+        r'html|css|sql|script|function|algorithm|class|method|syntax|debug|'
+        r'write\s+a\s+program|write\s+code|program\s+that|coding)\b',
+        re.IGNORECASE,
+    )
+    if result.intent_type == "CODING" and not _CODING_EXPLICIT_RE.search(query):
+        result.intent_type = "FACTOID"
+        result.needs_web = True
+        result.reasoning += " [Strict Override: Query lacks explicit programming keywords — overridden from CODING to FACTOID]."
+
+    return result
