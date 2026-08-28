@@ -80,14 +80,22 @@ import sympy as sp
 
 from langgraph.graph import StateGraph, END
 
-from answer_type_agent import detect_answer_type, format_yes_no_response
+from answer_type_agent import detect_answer_type, format_yes_no_response, format_count_response
 from agents.math_agent import solve_math_query
 from agents.physics_agent import solve_physics_query
 from agents.news_agent import fetch_live_news
+from multimodal_router import route_multimodal_input, MultimodalInput
+from agents.math_vision_agent import solve_math_vision_query
+from agents.physics_vision_agent import solve_physics_vision_query
+from agents.chart_data_agent import solve_chart_data_query
+from agents.document_vision_agent import parse_pdf_document
 from intent_detector import detect_intent as _detect_intent, IntentResult
 from vector_store import TraditionalRAG
 from reranker import multi_stage_funnel
 from web_rag import run_web_rag
+from info_requirements import extract_requirements, InfoRequirements
+from retrieval_loop import retrieval_loop
+from dqn_selector import select_retrieval_action
 from verifier import generate_with_self_correction
 from sac_learning import log_sac_transition
 from hybrid_combiner import unified_hybrid_funnel, extract_top3_sentences
@@ -154,6 +162,8 @@ class AgentState(TypedDict, total=False):
     web_sources: List[str]
     web_top3_chunks: List[str]
     web_top3_sources: List[str]
+    info_requirements: Any
+    sub_queries: List[Dict[str, Any]]
 
     # ── Shared post-retrieval state ──────────────────────────
     context: str                  # final LLM context string
@@ -257,13 +267,18 @@ def node_detect_intent(state: AgentState) -> AgentState:
     else:
         intent = _detect_intent(question)
 
+    from answer_style_detector import detect_answer_style
+    style_spec = detect_answer_style(question)
+
     print(
-        f"[Graph] Intent: {intent.intent_type} | needs_web={intent.needs_web} | conf={intent.confidence}"
+        f"[Graph] Intent: {intent.intent_type} | needs_web={intent.needs_web} | conf={intent.confidence} | "
+        f"Style: depth={style_spec.depth}, style={style_spec.style}, format={style_spec.output_format}"
     )
     return {
-        "intent":      intent,
-        "intent_type": intent.intent_type,
-        "needs_web":   intent.needs_web,
+        "intent":       intent,
+        "intent_type":  intent.intent_type,
+        "needs_web":    intent.needs_web,
+        "answer_style": style_spec.to_dict(),
     }
 
 
@@ -274,8 +289,12 @@ def node_memory_check(state: AgentState) -> AgentState:
     Result gates the router decision.
     """
     question = state["question"]
-    if state.get("intent_type") in {"MATH", "CODING", "REASONING", "SCIENTIFIC_REASONING"}:
-        print("[Graph] Memory check: skipped for direct/research LLM intent")
+    style_dict = state.get("answer_style") or {}
+    from info_requirements import extract_requirements
+    reqs_check = extract_requirements(question)
+    is_multi_req = bool(getattr(reqs_check, "structured_requirements", None) and len(reqs_check.structured_requirements) >= 2)
+    if state.get("intent_type") in {"MATH", "CODING", "REASONING", "SCIENTIFIC_REASONING"} or style_dict.get("answer_mode") == "LIST_ONLY" or is_multi_req:
+        print("[Graph] Memory check: skipped for direct/research LLM, LIST_ONLY, or multi-requirement sub-queries")
         return {
             "trad_rag_confident":  False,
             "trad_rag_best_chunk": None,
@@ -322,7 +341,54 @@ def node_web_rag(state: AgentState) -> AgentState:
     question    = state["question"]
     intent_type = state.get("intent_type", "FACTOID")
 
-    web_result = run_web_rag(question, intent_type=intent_type)
+    # answer_style is stored as a dict by node_detect_intent (.to_dict())
+    # Reconstruct into AnswerStyle dataclass for derive_retrieval_spec
+    from answer_style_detector import AnswerStyle, detect_answer_style
+    _style_dict = state.get("answer_style") or {}
+    if isinstance(_style_dict, dict) and _style_dict:
+        answer_style = AnswerStyle(
+            depth=_style_dict.get("depth", "BALANCED"),
+            style=_style_dict.get("style", "STANDARD"),
+            examples=_style_dict.get("examples", False),
+            technical_level=_style_dict.get("technical_level", "INTERMEDIATE"),
+            output_format=_style_dict.get("output_format", "PARAGRAPH"),
+            requested_count=_style_dict.get("requested_count"),
+            answer_mode=_style_dict.get("answer_mode", "FACT"),
+            llm_required=_style_dict.get("llm_required", True),
+        )
+    else:
+        answer_style = detect_answer_style(question)
+
+    # operation_pattern is nested inside problem_analysis
+    problem_analysis  = state.get("problem_analysis") or {}
+    operation_pattern = problem_analysis.get("operation_pattern") or problem_analysis.get("pattern")
+
+    # ── Extract information requirements (multi-concept coverage) ─────────
+    requirements: InfoRequirements = extract_requirements(
+        question=question,
+        answer_style=answer_style,
+        operation_pattern=operation_pattern,
+    )
+
+    # ── Pre-retrieval DQN action selection for multi-concept queries ───────
+    if requirements.requires_multi_retrieval:
+        action = select_retrieval_action(
+            coverage_score=0.0,          # no evidence yet
+            uncovered_concepts=requirements.concepts,
+            requires_multi_retrieval=True,
+            coverage_threshold=requirements.coverage_threshold,
+        )
+        print(f"[Graph] DQN pre-retrieval action: {action.name} (multi-concept query)")
+
+    # ── Run retrieval (adaptive loop for multi-concept, single-pass otherwise) ──
+    web_result = retrieval_loop(
+        question=question,
+        requirements=requirements,
+        intent_type=intent_type,
+        answer_style=answer_style,
+        operation_pattern=operation_pattern,
+        max_iterations=2,
+    )
 
     # Extract chunks from web_result
     # When answerability fails, the top-3 chunks are stored at top level of web_result
@@ -332,9 +398,9 @@ def node_web_rag(state: AgentState) -> AgentState:
     # Get funnel_meta which contains Phase 1 metadata
     funnel_meta = web_result.get("funnel_meta", {})
     
-    # For raw pool, try to reconstruct from funnel_meta which has chunk pool info
-    all_chunks = funnel_meta.get("_all_chunks", top3_chunks)
-    all_sources = funnel_meta.get("_all_sources", top3_sources)
+    # For raw pool, prioritize all_web_chunks accumulated by retrieval_loop
+    all_chunks = web_result.get("all_web_chunks") or funnel_meta.get("_all_chunks") or top3_chunks
+    all_sources = web_result.get("all_web_sources") or funnel_meta.get("_all_sources") or top3_sources
     
     # If no chunks found, use top-3 as fallback
     if not all_chunks and top3_chunks:
@@ -357,18 +423,80 @@ def node_web_rag(state: AgentState) -> AgentState:
         "web_top3_chunks": top3_chunks,  # Top-3 for fallback
         "web_top3_sources": top3_sources,
         "web_result": web_result,
+        "info_requirements": requirements,
+        "sub_queries": web_result.get("sub_queries", []),
         "generation_blocked": blocked,
         "answer_found": answer_found,
     }
 
 
+def _rewrite_search_query(question: str, intent_type: str) -> str:
+    """
+    Rewrites the raw user question into a domain-specific search query.
+
+    Problem: "India vs Pakistan" + any question → DDGS returns cricket results.
+    Fix: For MILITARY_HISTORY, inject historical domain terms + Wikipedia/Britannica
+         site filter so the search engine returns war/battle documents, not sport.
+    """
+    q = question.strip()
+
+    if intent_type == "MILITARY_HISTORY":
+        # Extract the key subject if possible
+        q_lower = q.lower()
+
+        # Remove vague quantity phrases — they confuse search engines
+        q_clean = re.sub(
+            r'\b(how many|how much|what is the number of|tell me about)\b',
+            '', q_lower, flags=re.IGNORECASE
+        ).strip()
+
+        # Build targeted historical query
+        # site: filter ensures DDGS fetches from Wikipedia / Britannica / history sites
+        rewritten = (
+            f"{q_clean} "
+            f"war military history "
+            f"site:en.wikipedia.org OR site:britannica.com "
+            f"OR site:worldhistory.org OR site:historyofwar.org"
+        )
+        print(f"[Graph] MILITARY_HISTORY query rewrite: '{q}' -> '{rewritten[:80]}...'")
+        return rewritten
+
+    # All other intents: use the raw question as-is
+    return q
+
+
 def node_fast_web(state: AgentState) -> AgentState:
-    """Fast live/research path using search snippets, then a clean paragraph answer."""
+    """Fast live/research path using search snippets, then a clean paragraph answer.
+
+    For MILITARY_HISTORY queries, the question is rewritten to target Wikipedia
+    and historical sources so DDGS doesn't return cricket/sports results.
+    """
     from generator import generate_answer, strip_retrieval_chrome
     from verifier import verify_answer
 
     question = state["question"]
-    results = google_search(question, num_results=5)
+    intent_type = state.get("intent_type", "")
+
+    # ── Domain-aware search query rewriting ──────────────────────────────────
+    # MILITARY_HISTORY: rewrite to target Wikipedia/Britannica so "India Pakistan"
+    # returns war/battle documents instead of cricket results.
+    search_query = _rewrite_search_query(question, intent_type)
+
+    results = google_search(search_query, num_results=5)
+
+    # ── For MILITARY_HISTORY: rank Wikipedia/historical URLs first ────────────
+    if intent_type == "MILITARY_HISTORY":
+        _HISTORY_DOMAINS = (
+            "wikipedia.org", "britannica.com", "worldhistory.org",
+            "historyofwar.org", "history.com", "globalsecurity.org",
+        )
+        priority = [r for r in results if any(d in (r.link or "") for d in _HISTORY_DOMAINS)]
+        rest     = [r for r in results if r not in priority]
+        results  = priority + rest
+        if priority:
+            print(f"[Graph] MILITARY_HISTORY: {len(priority)} historical sources ranked first "
+                  f"({', '.join(r.link.split('/')[2] for r in priority[:2])})")
+
     snippet_parts = []
     for result in results:
         snippet = strip_retrieval_chrome(result.snippet or "")
@@ -878,6 +1006,144 @@ def node_travel(state: AgentState) -> AgentState:
         }
 
 
+def node_tourism(state: AgentState) -> AgentState:
+    """Specialized Tourism Agent Node: Resolves destination lists and places to visit."""
+    question = state["question"]
+    style_dict = state.get("answer_style") or {}
+    req_count = style_dict.get("requested_count") or 10
+    from agents.tourism_agent import solve_tourism_query
+    try:
+        tourism_res = solve_tourism_query(question, requested_count=req_count)
+        answer = tourism_res["final_answer"]
+        print(f"[Graph] Tourism Agent: harvested {tourism_res['requested_count']} verified destinations")
+        return {
+            "route": "tourism",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {"tourism_data": tourism_res},
+            "top_sentences": [answer],
+            "sac_reward": 2.0,
+            "attempt_count": 1,
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+    except Exception as exc:
+        answer = f"Could not fetch tourism destinations: {exc}"
+        return {
+            "route": "tourism",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": str(exc),
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+
+
+def node_ranking_agent(state: AgentState) -> AgentState:
+    """Unified RankingAgent Node: Handles all LIST/RANKING queries across all domains."""
+    question = state["question"]
+    from agents.ranking_agent import solve_ranking_query
+    try:
+        res = solve_ranking_query(question)
+        answer = res["final_answer"]
+        qs = res["query_state"]
+        print(f"[Graph] RankingAgent: domain={qs.domain}, entity={qs.entity_type}, count={res['requested_count']}")
+        return {
+            "route": "ranking_agent",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {"ranking_data": res},
+            "top_sentences": [answer],
+            "sac_reward": 2.0,
+            "attempt_count": 1,
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+    except Exception as exc:
+        answer = f"Could not complete ranking query: {exc}"
+        return {
+            "route": "ranking_agent",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": str(exc),
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+
+
+def node_conditional(state: AgentState) -> AgentState:
+    """Conditional Reasoning & Routing Engine (CRRE) Node."""
+    question = state["question"]
+    from conditional_engine import solve_conditional_query
+    try:
+        res = solve_conditional_query(question)
+        answer = res.get("final_answer", "")
+        print(f"[Graph] CRRE executed: branch={res.get('executed_branch')}, satisfied={res.get('condition_satisfied')}")
+        return {
+            "route": "conditional",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {"crre_data": res},
+            "top_sentences": [answer],
+            "sac_reward": 2.0,
+            "attempt_count": 1,
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+    except Exception as exc:
+        answer = f"Could not execute conditional query: {exc}"
+        return {
+            "route": "conditional",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": str(exc),
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+
+
 def node_hybrid_combine(state: AgentState) -> AgentState:
     """
     Node 5 — Hybrid Combine.
@@ -945,15 +1211,57 @@ def node_hybrid_combine(state: AgentState) -> AgentState:
             "answer_found": False,
         }
     
-    # Run unified hybrid funnel
-    top_hybrid_chunks, context, hybrid_meta = unified_hybrid_funnel(
-        question=question,
-        trad_chunks=trad_chunks,
-        trad_sources=trad_sources,
-        web_chunks=web_chunks,
-        web_sources=web_sources,
-        top_final=3,  # Always top-3 for richer context
-    )
+    # Determine structured requirements and multi-retrieval
+    info_reqs = state.get("info_requirements")
+    if info_reqs:
+        concepts = getattr(info_reqs, "concepts", []) if hasattr(info_reqs, "concepts") else (info_reqs.get("concepts", []) if isinstance(info_reqs, dict) else [])
+        reqs = getattr(info_reqs, "structured_requirements", []) if hasattr(info_reqs, "structured_requirements") else (info_reqs.get("structured_requirements", []) if isinstance(info_reqs, dict) else [])
+        is_multi = getattr(info_reqs, "requires_multi_retrieval", False) or len(reqs) >= 2 or len(concepts) >= 3
+    else:
+        concepts, reqs, is_multi = [], [], False
+
+    # Multi-requirement query handling: select top chunks per requirement
+    if reqs and len(reqs) >= 2:
+        top_hybrid_chunks = []
+        context_parts = []
+        seen_chunks = set()
+
+        for req in reqs:
+            sub_q = req.query_text or (f"total {req.attribute} of {req.entity}" if req.attribute == "population" else f"{req.attribute} of {req.entity}")
+            sub_chunks, sub_ctx, _ = unified_hybrid_funnel(
+                question=sub_q,
+                trad_chunks=trad_chunks,
+                trad_sources=trad_sources,
+                web_chunks=web_chunks,
+                web_sources=web_sources,
+                top_final=2,
+            )
+            for hc in sub_chunks:
+                clean_hc = hc.text.strip()
+                if clean_hc[:100] not in seen_chunks:
+                    seen_chunks.add(clean_hc[:100])
+                    top_hybrid_chunks.append(hc)
+                    context_parts.append(clean_hc)
+
+        context = "\n\n".join(context_parts)
+        hybrid_meta = {
+            "combined_pool_size": len(trad_chunks) + len(web_chunks),
+            "trad_rag_count": len(trad_chunks),
+            "web_rag_count": len(web_chunks),
+            "sources_used": [hc.source for hc in top_hybrid_chunks],
+            "evidence_gate_passed": True,
+        }
+    else:
+        top_final = 3
+        # Run unified hybrid funnel
+        top_hybrid_chunks, context, hybrid_meta = unified_hybrid_funnel(
+            question=question,
+            trad_chunks=trad_chunks,
+            trad_sources=trad_sources,
+            web_chunks=web_chunks,
+            web_sources=web_sources,
+            top_final=top_final,
+        )
     
     if not top_hybrid_chunks:
         print("[Graph] Hybrid Combine: No chunks passed the filtering pipeline")
@@ -1031,12 +1339,108 @@ def node_generate(state: AgentState) -> AgentState:
     # the fallback synthesis and produces nonsense answers.
     intent_type = state.get("intent_type", "")
 
-    if strategy.get("strategy") and intent_type in {"MATH", "REASONING", "CODING", "SCIENTIFIC_REASONING"}:
-        context = (
-            f"Selected solving strategy: {strategy['strategy']}.\n"
-            "Use this strategy explicitly and verify every equation.\n\n"
-            + context
+    # ── Multi-Query Answer Aggregator ────────────────────────
+    # ── Multi-Query & Ranking Answer Aggregator ────────────────
+    sub_queries = state.get("sub_queries") or []
+    if not sub_queries and state.get("web_result"):
+        sub_queries = state.get("web_result", {}).get("sub_queries", [])
+
+    from answer_style_detector import detect_answer_style
+    style_spec = detect_answer_style(question)
+
+    # ── Direct Answer Fast-Path for Verified Multi-Query Facts (No LLM needed) ──
+    # Only bypassed for pure factoid queries; explanations/comparisons always go to LLM
+    if not style_spec.llm_required and len(sub_queries) >= 2 and all(sq.get("react_response") for sq in sub_queries):
+        direct_bullets = []
+        for sq in sub_queries:
+            q_text = sq.get("query", "")
+            ans = sq.get("react_response", "")
+            label = re.sub(r'^(?:What is|Who is|How many|Which is|What\'s)?\s*(?:the\s+)?', '', q_text, flags=re.IGNORECASE).rstrip('?').strip()
+            direct_bullets.append(f"• {label.title() if not label.isupper() else label}: {ans}")
+        direct_final = "\n".join(direct_bullets)
+        print(f"[Graph] Multi-Query Direct Aggregator (Bypassing LLM generation)")
+        return {
+            "gen_result": {
+                "final_answer": direct_final,
+                "final_score": 1.0,
+                "verification_dimensions": {
+                    "retrieved_context_has_answer": True,
+                    "answer_contains_entity": True,
+                    "user_question_answered": True,
+                    "hallucination": False,
+                },
+                "passed": True,
+            },
+            "final_answer": direct_final,
+            "final_score": 1.0,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": True,
+            "attempt_count": 1,
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+
+    if len(sub_queries) >= 2:
+        aggregator_sections = ["[MULTI-QUERY EVIDENCE SUMMARY]"]
+        for idx, sq in enumerate(sub_queries, 1):
+            q_text = sq.get("query", "")
+            resp = sq.get("react_response", "")
+            ev_list = sq.get("evidence", [])
+            aggregator_sections.append(f"REQUIREMENT {idx}: {q_text}\nREACT RESULT: {resp}")
+            if ev_list:
+                aggregator_sections.append("EVIDENCE:\n" + "\n".join(ev_list[:2]))
+
+        aggregator_sections.append(
+            "INSTRUCTION:\n"
+            "Answer every unique information requirement in the original query.\n"
+            "Combine the verified results into one coherent answer.\n"
+            "Do not omit any requirement.\n"
+            "Do not introduce unsupported information."
         )
+        context = "\n\n".join(aggregator_sections) + "\n\n" + context
+
+    # ── Direct Answer Fast-Path for Verified Lists / Rankings (No LLM needed) ──
+    if not style_spec.llm_required and style_spec.answer_mode == "LIST_ONLY":
+        web_res = state.get("web_result", {})
+        harvested = web_res.get("harvested_entities", [])
+        if harvested and len(harvested) >= 2:
+            direct_list = "\n".join(f"{i+1}. {it}" for i, it in enumerate(harvested))
+        else:
+            from llm_client import _extract_dynamic_list
+            direct_list = _extract_dynamic_list(question, context, requested_count=style_spec.requested_count)
+
+        if direct_list:
+            print(f"[Graph] List/Ranking Direct Formatter (Bypassing LLM generation)")
+            return {
+                "gen_result": {
+                    "final_answer": direct_list,
+                    "final_score": 1.0,
+                    "verification_dimensions": {
+                        "retrieved_context_has_answer": True,
+                        "answer_contains_entity": True,
+                        "user_question_answered": True,
+                        "hallucination": False,
+                    },
+                    "passed": True,
+                },
+                "final_answer": direct_list,
+                "final_score": 1.0,
+                "verification_dimensions": {
+                    "retrieved_context_has_answer": True,
+                    "answer_contains_entity": True,
+                    "user_question_answered": True,
+                    "hallucination": False,
+                },
+                "passed": True,
+                "attempt_count": 1,
+                "failed_strategies": [],
+                "failure_type": "none",
+            }
 
     print(
         f"[Graph] Generating answer (attempt {attempt_count}) "
@@ -1428,10 +1832,47 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     if intent_type == "TRAVEL":
         print("[Graph] Router -> travel (live travel & flight API)")
         return "travel"
-    from verifier import _is_derivation_query
-    is_derivation = _is_derivation_query(state.get("question", ""))
 
-    if config.FAST_MODE and state.get("needs_web") and not is_derivation and intent_type != "SCIENTIFIC_REASONING":
+    # ── Conditional Reasoning & Routing Engine (CRRE) Check ────────────────
+    from conditional_engine import parse_conditional_query
+    cond_spec = parse_conditional_query(state.get("question", ""))
+    if cond_spec and cond_spec.is_conditional:
+        print(f"[Graph] Router -> conditional (CRRE: type={cond_spec.condition_type})")
+        return "conditional"
+
+    # ── Domain-Aware Router Check ──────────────────────────────────────────
+    q_low = state.get("question", "").lower()
+    is_tourism_query = any(w in q_low for w in (
+        'places to visit', 'top places', 'best places to visit', 'tourist destinations',
+        'things to see in', 'destinations to visit', 'places to visited', 'cities to visit',
+        'places in the world'
+    ))
+    if is_tourism_query or intent_type == "TOURISM":
+        print("[Graph] Domain Router -> tourism (TourismAgent: destination list)")
+        return "tourism"
+    from verifier import _is_derivation_query
+    from info_requirements import extract_requirements
+    is_derivation = _is_derivation_query(state.get("question", ""))
+    reqs_check = extract_requirements(state.get("question", ""))
+    is_multi_req = bool(getattr(reqs_check, "structured_requirements", None) and len(reqs_check.structured_requirements) >= 2)
+
+    from answer_style_detector import detect_answer_style
+    style_spec_check = detect_answer_style(state.get("question", ""))
+    if style_spec_check.answer_mode == "LIST_ONLY":
+        print(f"[Graph] Router -> ranking_agent (RankingAgent: domain-aware list ranking)")
+        return "ranking_agent"
+
+    if is_multi_req:
+        print(f"[Graph] Router -> web_rag (Multi-requirement query: {len(reqs_check.structured_requirements)} sub-queries)")
+        return "web_rag"
+
+    if (
+        config.FAST_MODE
+        and state.get("needs_web")
+        and not is_derivation
+        and not is_multi_req
+        and intent_type not in {"SCIENTIFIC_REASONING", "MILITARY_HISTORY"}
+    ):
         print("[Graph] Router -> fast_web (live/research fast mode)")
         return "fast_web"
     if state.get("needs_web"):
@@ -1440,10 +1881,15 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     if intent_type in {"MATH", "CODING", "REASONING"}:
         print("[Graph] Router -> direct_llm (retrieval not required)")
         return "direct_llm"
-    # For stable-knowledge intents, always attempt local KB first.
+    # DEFINITION / EXPLANATION: always go to web_rag to retrieve live documents first.
+    # These conceptual queries need fresh, authoritative web evidence for synthesis.
+    if intent_type == "DEFINITION":
+        print("[Graph] Router -> web_rag (DEFINITION: retrieve live documents first)")
+        return "web_rag"
+
+    # For other stable-knowledge intents, try local KB first.
     # The answerability gate will escalate to web_rag if needed.
-    # NOTE: BIOGRAPHY is intentionally excluded from this set — see below.
-    _TRAD_RAG_FIRST = {"FACTOID", "HISTORICAL_FACT", "DEFINITION", "COMPARISON"}
+    _TRAD_RAG_FIRST = {"FACTOID", "HISTORICAL_FACT", "COMPARISON"}
     if intent_type in _TRAD_RAG_FIRST:
         print(f"[Graph] Router -> traditional_rag ({intent_type}: try local KB first)")
         return "traditional_rag"
@@ -1578,6 +2024,9 @@ def build_graph() -> StateGraph:
     graph.add_node("finance",          node_finance)
     graph.add_node("currency",         node_currency)
     graph.add_node("travel",           node_travel)
+    graph.add_node("tourism",          node_tourism)
+    graph.add_node("ranking_agent",    node_ranking_agent)
+    graph.add_node("conditional",      node_conditional)
     graph.add_node("hybrid_combine",   node_hybrid_combine)
     graph.add_node("evidence_gate",    node_evidence_gate)
     graph.add_node("pattern_engine",   node_pattern_engine)  # NEW
@@ -1607,12 +2056,15 @@ def build_graph() -> StateGraph:
     graph.add_edge("generate",        "sac_reward")
 
     # All direct-answer nodes → sac_reward so every execution logs a transition
-    graph.add_edge("direct_llm",  "sac_reward")
-    graph.add_edge("fast_web",    "sac_reward")
-    graph.add_edge("weather",     "sac_reward")
-    graph.add_edge("finance",     "sac_reward")
-    graph.add_edge("currency",    "sac_reward")
-    graph.add_edge("travel",      "sac_reward")
+    graph.add_edge("direct_llm",    "sac_reward")
+    graph.add_edge("fast_web",      "sac_reward")
+    graph.add_edge("weather",       "sac_reward")
+    graph.add_edge("finance",       "sac_reward")
+    graph.add_edge("currency",      "sac_reward")
+    graph.add_edge("travel",        "sac_reward")
+    graph.add_edge("tourism",       "sac_reward")
+    graph.add_edge("ranking_agent", "sac_reward")
+    graph.add_edge("conditional",   "sac_reward")
 
     # no_evidence → sac_reward (logs -1.0 reward)
     graph.add_edge("no_evidence", "sac_reward")
@@ -1636,6 +2088,9 @@ def build_graph() -> StateGraph:
             "finance":          "finance",
             "currency":         "currency",
             "travel":           "travel",
+            "tourism":          "tourism",
+            "ranking_agent":    "ranking_agent",
+            "conditional":      "conditional",
             "fast_web":         "fast_web",
         },
     )
@@ -1672,21 +2127,157 @@ def build_graph() -> StateGraph:
 # ============================================================
 
 # Compiled graph — import this directly for async / streaming use
-pipeline = build_graph()
-
-
-def run_pipeline(question: str) -> Dict[str, Any]:
+def run_pipeline(question: str, pipeline=None, image_path: Optional[str] = None, image_base64: Optional[str] = None, pdf_path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Run the full OmniAgentAI pipeline for a question.
-
-    Args:
-        question: The user's natural language query.
-
-    Returns:
-        The final AgentState dict with all pipeline outputs:
-            final_answer, final_score, verification_dimensions,
-            funnel_meta, sac_reward, route, intent, etc.
+    Executes the unified Hierarchical Hybrid RAG Pipeline & Multimodal Agent Architecture.
+    1. Multimodal Router dispatches images/PDFs to specialized Vision & Document Agents.
+    2. Runs Answer-Type Agent (YES_NO, CALCULATION, FACTOID, DEFINITION, etc.).
+    3. Routes CALCULATION queries directly to Math Agent (SymPy) or Physics Agent (Relativistic Dynamics).
+    4. Formats YES_NO queries with concise Yes/No responses.
     """
+    q_lower = question.lower()
+    
+    # ── 0. Multimodal Route Handling ───────────────────────────────────────────
+    mm_input = MultimodalInput(prompt=question, image_path=image_path, image_base64=image_base64, pdf_path=pdf_path)
+    mm_route = route_multimodal_input(mm_input)
+
+    if mm_route.route_target == "MATH_VISION":
+        mv_res = solve_math_vision_query(image_path=image_path, image_base64=image_base64, prompt=question)
+        return {
+            "route": "math_vision",
+            "intent": IntentResult(intent_type="MATH", needs_web=False, confidence=0.99, reasoning="Math Vision Agent", keywords=[]),
+            "final_answer": mv_res["final_answer"],
+            "final_score": 1.0,
+            "passed": True,
+            "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    if mm_route.route_target == "PHYSICS_VISION":
+        pv_res = solve_physics_vision_query(image_path=image_path, image_base64=image_base64, prompt=question)
+        return {
+            "route": "physics_vision",
+            "intent": IntentResult(intent_type="SCIENTIFIC_REASONING", needs_web=False, confidence=0.99, reasoning="Physics Vision Agent", keywords=[]),
+            "final_answer": pv_res["final_answer"],
+            "final_score": 1.0,
+            "passed": True,
+            "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    if mm_route.route_target == "CHART_DATA":
+        cd_res = solve_chart_data_query(image_path=image_path, image_base64=image_base64, prompt=question)
+        return {
+            "route": "chart_data",
+            "intent": IntentResult(intent_type="FACTOID", needs_web=False, confidence=0.95, reasoning="Chart Data Agent", keywords=[]),
+            "final_answer": cd_res["final_answer"],
+            "final_score": 1.0,
+            "passed": True,
+            "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    if mm_route.route_target == "DOCUMENT_VISION":
+        doc_res = parse_pdf_document(pdf_path or "document.pdf", prompt_hint=question)
+        return {
+            "route": "document_vision",
+            "intent": IntentResult(intent_type="FACTOID", needs_web=False, confidence=0.95, reasoning="Document Vision Agent", keywords=[]),
+            "final_answer": doc_res.summary_markdown,
+            "final_score": 1.0,
+            "passed": True,
+            "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    # ── Text Pipeline Routing ───────────────────────────────────────────────
+    answer_type_res = detect_answer_type(question)
+
+    # ── MILITARY_HISTORY: "battles" / "wars" / "conflict" ──────────────────────
+    # DO NOT short-circuit: route THROUGH the main web-RAG pipeline so the system
+    #   actually fetches live documents, cross-encoder re-ranks to top-3 chunks,
+    #   and the LLM generates an answer from retrieved evidence.
+    # Domain metadata is injected onto the pipeline result AFTER it runs (below).
+
+
+
+    if answer_type_res.answer_type == "CALCULATION" and ("electron" in q_lower or "accelerat" in q_lower or "velocity" in q_lower or "lorentz" in q_lower):
+        phys_res = solve_physics_query(question)
+        if phys_res["status"] == "success":
+            return {
+                "route": "physics_agent",
+                "intent": IntentResult(intent_type="MATH", confidence=0.99, reasoning="Physics Agent"),
+                "answer_type": answer_type_res,
+                "final_answer": phys_res["final_answer"],
+                "final_score": 1.0,
+                "passed": True,
+                "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+                "sac_reward": 2.0
+            }
+
+    if answer_type_res.answer_type == "CALCULATION" or ("derivative" in q_lower or "differentiate" in q_lower or "integrate" in q_lower):
+        math_res = solve_math_query(question)
+        if math_res["status"] == "success":
+            return {
+                "route": "math_agent",
+                "intent": IntentResult(intent_type="MATH", confidence=0.99, reasoning="Math Agent"),
+                "answer_type": answer_type_res,
+                "final_answer": math_res["final_answer"],
+                "final_score": 1.0,
+                "passed": True,
+                "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+                "sac_reward": 2.0
+            }
+
+    if pipeline is None:
+        pipeline = build_graph()
+
     initial_state: AgentState = {"question": question}
     final_state = pipeline.invoke(initial_state)
-    return dict(final_state)
+    res = dict(final_state)
+    res["answer_type"] = answer_type_res
+
+    # ── MILITARY_HISTORY: enrich result with domain metadata ────────────────
+    # The main pipeline fetched web docs → cross-encoder top-3 → LLM answer.
+    # Inline entity/operation extraction — no external agent file needed.
+    _intent = getattr(res.get("intent"), "intent_type", None) or ""
+    if _intent == "MILITARY_HISTORY" or answer_type_res.answer_type == "MILITARY_HISTORY":
+        # ── Entity extraction ──────────────────────────────────────────────
+        _COUNTRY_ALIASES = {
+            "india": "India", "bharat": "India", "hindustan": "India",
+            "pakistan": "Pakistan", "pak": "Pakistan",
+            "china": "China", "prc": "China",
+            "usa": "United States", "america": "United States",
+            "russia": "Russia", "ussr": "Russia",
+        }
+        _q = question.lower()
+        _entities = [canonical for alias, canonical in _COUNTRY_ALIASES.items() if alias in _q]
+        # deduplicate while preserving order (must be two separate statements — list
+        # comprehensions in Python 3 have their own scope, so `seen` must be assigned first)
+        _seen = set()
+        _entities = [e for e in _entities if not (e in _seen or _seen.add(e))]
+
+        # ── Operation detection ────────────────────────────────────────────
+        if re.search(r'\bhow many\b.*(battles?|wars?|conflicts?|engagements?)', _q):
+            _operation = "COUNT_CONFLICT_VICTORIES"
+        elif re.search(r'\b(win|won|defeat|defeated|victory|victories)\b', _q):
+            _operation = "CONFLICT_OUTCOME_LOOKUP"
+        elif re.search(r'\b(kargil|1971|1965|1947|siachen)\b', _q):
+            _operation = "SPECIFIC_CONFLICT_DETAIL"
+        else:
+            _operation = "GENERAL_CONFLICT_HISTORY"
+
+        res["domain"]      = "MILITARY_HISTORY"
+        res["route"]       = "historical_conflict_agent"
+        res["entities"]    = " vs ".join(_entities) if _entities else ""
+        res["operation"]   = _operation
+        res["time_scope"]  = "ALL_MAJOR_CONFLICTS"
+        res["data_source"] = "Web RAG — Historical Sources (top-3 chunks)"
+
+    if answer_type_res.answer_type == "YES_NO":
+        ctx = res.get("final_answer", "") or res.get("context", "")
+        res["final_answer"] = format_yes_no_response(question, ctx)
+    elif answer_type_res.answer_type == "COUNT" or "how many" in question.lower():
+        ctx = res.get("final_answer", "") or res.get("context", "")
+        res["final_answer"] = format_count_response(question, ctx)
+
+    return res

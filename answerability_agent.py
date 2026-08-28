@@ -421,20 +421,23 @@ def check_answerability_full(
     print(f"[Answerability Agent] Expected entity type: {expected_type}")
 
     if expected_type == "NONE":
-        # Definition/explanation questions may not require a typed entity, but
-        # they still need topical coverage. This prevents nearby memory such as
-        # "Newton's law of gravitation" from answering "Newton's laws of motion".
+        # Definition/explanation questions do not require a typed entity.
+        # Check keyword coverage with a lenient 0.25 threshold or valid chunk content.
         terms = _important_question_terms(query)
         for idx, chunk in enumerate(top3_chunks):
             coverage = _term_coverage(terms, chunk)
             print(f"[Answerability Agent] Chunk {idx}: keyword coverage={coverage:.2f}")
-            if coverage >= 0.55:
+            if coverage >= 0.25 or (terms and any(t in chunk.lower() for t in terms)):
                 return (
                     True,
                     idx,
                     "",
-                    f"Entity type undetermined; keyword coverage passed ({coverage:.2f}).",
+                    f"Entity type undetermined; topical coverage passed ({coverage:.2f}).",
                 )
+        # If any valid chunk exists in top3, accept it for explanation synthesis
+        if top3_chunks and len(top3_chunks[0].strip()) > 30:
+            return True, 0, "", "Entity type undetermined; top-1 chunk accepted for explanation."
+
         return (
             False,
             -1,

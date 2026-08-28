@@ -199,17 +199,21 @@ _CODING_RE = re.compile(
 # ── COMPARISON ───────────────────────────────────────────────────────────────
 _COMPARISON_RE = re.compile(
     r'\b(difference\s+between|compare\s+|versus\s+|\bvs\.?\b|'
-    r'better\s+(than|between)|which\s+(is|are)\s+(better|faster|cheaper|'
-    r'more|less|worse)|pros\s+and\s+cons|advantages?\s+(of|and)|'
+    r'better\s+(than|between)|which\s+(is|are)\s+(?:the\s+)?(better|faster|cheaper|'
+    r'more|less|worse|strongest|best|most\s+powerful|greatest|most\s+elite|highest|fastest|smartest)|'
+    r'strongest\s+|most\s+powerful\s+|top\s+\d+|best\s+(?:special\s+forces|military|army|navy|tanks|fighters|jets|weapons|snipers|country|countries)|'
+    r'pros\s+and\s+cons|advantages?\s+(of|and)|'
     r'disadvantages?\s+(of|and))\b',
     re.IGNORECASE,
 )
 
-# ── DEFINITION ───────────────────────────────────────────────────────────────
+# ── DEFINITION / EXPLANATION ──────────────────────────────────────────────────
 _DEFINITION_RE = re.compile(
     r'\b(what\s+is\s+(a\s+|an\s+|the\s+)?(?!price|rate|cost|value|cheapest|lowest|flight|ticket|hotel|fare|airfare|travel)'
     r'|define\s+|definition\s+of|what\s+does\s+\w+\s+mean|'
-    r'meaning\s+of|explain\s+(what|the\s+concept)|'
+    r'meaning\s+of|explain\s+(what|how|why|the\s+concept|in|a|the)|'
+    r'give\s+me\s+a\s+(comprehensive|detailed|deep)?\s*explanation|'
+    r'explanation\s+of\s+how|'
     r'what\s+are\s+(the\s+)?(types|kinds|categories|examples)\s+of)\b',
     re.IGNORECASE,
 )
@@ -298,11 +302,26 @@ _FACTOID_RE = re.compile(
 )
 
 
+# ── MILITARY / HISTORICAL CONFLICT ─────────────────────────────────────────
+# Key action words: "battles", "wars", "wars won", "military conflicts", "defeated"
+# MUST fire BEFORE _SPORTS_RE to prevent "battles" being miscategorised as SPORTS.
+_MILITARY_HISTORY_RE = re.compile(
+    r'\b('
+    r'battle|battles|war|wars|conflict|conflicts|military|'
+    r'troops|army|armies|invasion|invaded|conquer|conquered|'
+    r'defeated|siege|skirmish|engagement|ceasefire|kargil|'
+    r'how many (battles|wars|conflicts|engagements)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+
 # ---------------------------------------------------------------------------
 # Routing table: intent_type -> (needs_web, confidence)
 # ---------------------------------------------------------------------------
 _ROUTING: dict = {
-    "CURRENCY":        (True,  0.99),  # live exchange rate — always web
+    "MILITARY_HISTORY": (True,  0.96),  # Historical Conflict Agent — needs web/historical sources
+    "CURRENCY":         (True,  0.99),  # live exchange rate — always web
     "WEATHER":         (True,  0.98),
     "FINANCE":         (True,  0.98),
     "TRAVEL":          (True,  0.98),  # live flight/travel search — always web
@@ -389,6 +408,16 @@ def _heuristic_intent(query: str) -> IntentResult | None:
     'who is president of X' never misclassifies as BIOGRAPHY/FACTOID.
     """
     words = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 2]
+    # ── MILITARY_HISTORY: "battles" / "wars" / "conflict" ──────────────────
+    if _MILITARY_HISTORY_RE.search(query):
+        needs_web, conf = _ROUTING["MILITARY_HISTORY"]
+        return IntentResult(
+            intent_type="MILITARY_HISTORY",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=words,
+            reasoning="Heuristic: action word 'battles/wars/conflict' → Military/Historical domain.",
+        )
 
     if _CURRENCY_RE.search(query):
         needs_web, conf = _ROUTING["CURRENCY"]

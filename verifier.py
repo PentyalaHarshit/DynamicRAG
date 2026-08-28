@@ -65,6 +65,12 @@ class VerificationResult:
     score: float
     dimensions: Dict[str, bool]
     feedback: str
+    coverage_score: float = 1.0          # fraction of required concepts covered (0.0-1.0)
+    uncovered_concepts: list = None      # concepts missing from the answer
+
+    def __post_init__(self):
+        if self.uncovered_concepts is None:
+            self.uncovered_concepts = []
 
     @property
     def hallucination(self) -> bool:
@@ -106,7 +112,12 @@ def _count_derivation_milestones(text: str) -> int:
     return milestones
 
 
-def _heuristic_verify(question: str, context: str, answer: str) -> VerificationResult:
+def _heuristic_verify(
+    question: str,
+    context: str,
+    answer: str,
+    requirements=None,
+) -> VerificationResult:
     """
     Entity-based heuristic verification used when Ollama is unavailable.
     Checks whether the answer contains entities from the context that
@@ -207,11 +218,32 @@ def _heuristic_verify(question: str, context: str, answer: str) -> VerificationR
         "hallucination": hallucination,
     }
 
-    score = (0.40 * float(question_answered)) + (0.35 * float(has_entity)) + (0.25 * float(ctx_has_answer))
+    # ── 5th dimension: Concept Coverage ──────────────────────────────────
+    coverage_score = 1.0
+    uncovered_concepts: list = []
+    if requirements is not None:
+        from info_requirements import check_concept_coverage
+        cov = check_concept_coverage(answer, requirements)
+        coverage_score = cov["coverage_score"]
+        uncovered_concepts = cov["uncovered_concepts"]
+        dims["concept_coverage"] = coverage_score >= requirements.coverage_threshold
+
+    # Score formula: 4 original dims (0.80 total weight) + coverage (0.20)
+    score = (
+        (0.32 * float(question_answered))
+        + (0.28 * float(has_entity))
+        + (0.20 * float(ctx_has_answer))
+        + (0.20 * coverage_score)
+    )
     if hallucination:
         score = max(0.0, score - 0.50)
 
     feedback = (
+        f"Heuristic verification (LLM unavailable): "
+        f"entity_type={entity_type}, has_entity={has_entity}, "
+        f"ctx_has_answer={ctx_has_answer}, question_answered={question_answered}, "
+        f"coverage={coverage_score:.2f} ({len(requirements.concepts) - len(uncovered_concepts)}/{len(requirements.concepts)} concepts)"
+        if requirements else
         f"Heuristic verification (LLM unavailable): "
         f"entity_type={entity_type}, has_entity={has_entity}, "
         f"ctx_has_answer={ctx_has_answer}, question_answered={question_answered}"
@@ -221,10 +253,17 @@ def _heuristic_verify(question: str, context: str, answer: str) -> VerificationR
         score=round(score, 3),
         dimensions=dims,
         feedback=feedback,
+        coverage_score=coverage_score,
+        uncovered_concepts=uncovered_concepts,
     )
 
 
-def verify_answer(question: str, context: str, answer: str) -> VerificationResult:
+def verify_answer(
+    question: str,
+    context: str,
+    answer: str,
+    requirements=None,
+) -> VerificationResult:
     """
     Evaluates answer quality across 4 factual grounding dimensions.
     Evasive/refused answers are fast-pathed to score 0.0 without LLM call.
@@ -273,12 +312,12 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
         # If the LLM call fell back, use heuristic verification instead
         if was_fallback():
             print("[Verifier] LLM unavailable - using heuristic entity verification.")
-            return _heuristic_verify(question, context, answer)
+            return _heuristic_verify(question, context, answer, requirements)
         parsed = json.loads(raw)
     except Exception:
         # LLM response wasn't valid JSON — try heuristic verification
         print("[Verifier] Could not parse LLM response - using heuristic verification.")
-        return _heuristic_verify(question, context, answer)
+        return _heuristic_verify(question, context, answer, requirements)
 
     ctx_has  = bool(parsed.get("retrieved_context_has_answer", False))
     ent      = bool(parsed.get("answer_contains_entity",       False))
@@ -293,12 +332,33 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
             ans_q = False
             incomplete_derivation = True
 
-    # Calibrated weighted score
-    score = (0.40 * float(ans_q)) + (0.35 * float(ent)) + (0.25 * float(ctx_has))
+    # ── 5th dimension: Concept Coverage (LLM path) ───────────────────────
+    coverage_score = 1.0
+    uncovered_concepts: list = []
+    if requirements is not None:
+        from info_requirements import check_concept_coverage
+        cov = check_concept_coverage(answer, requirements)
+        coverage_score = cov["coverage_score"]
+        uncovered_concepts = cov["uncovered_concepts"]
+        dims["concept_coverage"] = coverage_score >= requirements.coverage_threshold
+        if coverage_score < requirements.coverage_threshold:
+            print(
+                f"[Verifier] Coverage BELOW threshold: "
+                f"{coverage_score:.2f} < {requirements.coverage_threshold:.2f} | "
+                f"uncovered={uncovered_concepts}"
+            )
+
+    # Calibrated weighted score (coverage gets 0.20 weight)
+    score = (
+        (0.32 * float(ans_q))
+        + (0.28 * float(ent))
+        + (0.20 * float(ctx_has))
+        + (0.20 * coverage_score)
+    )
     if incomplete_derivation:
         score = min(score, 0.20)
     if hal:
-        score = max(0.0, score - 0.50)   # Hard penalty for hallucination
+        score = max(0.0, score - 0.50)
 
     dims = {
         "retrieved_context_has_answer": ctx_has,
@@ -312,6 +372,8 @@ def verify_answer(question: str, context: str, answer: str) -> VerificationResul
         score=round(score, 3),
         dimensions=dims,
         feedback=parsed.get("feedback", ""),
+        coverage_score=coverage_score,
+        uncovered_concepts=uncovered_concepts,
     )
 
 

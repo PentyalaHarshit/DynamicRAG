@@ -202,5 +202,38 @@ class TestAnswerTypeAndReasoningAgents(unittest.TestCase):
         self.assertTrue(ans.startswith("Yes."))
 
 
+class TestConditionalReasoningEngine(unittest.TestCase):
+    """Unit tests for Conditional Reasoning & Routing Engine (CRRE)"""
+
+    def test_numeric_condition_parsing(self):
+        from conditional_engine import parse_conditional_query
+        spec = parse_conditional_query("If the USA population is greater than 300 million, tell me its capital")
+        self.assertIsNotNone(spec)
+        self.assertTrue(spec.is_conditional)
+        self.assertEqual(spec.condition_type, "NUMERIC")
+        self.assertEqual(spec.operator, ">")
+        self.assertEqual(spec.target_value, 300_000_000.0)
+
+    def test_membership_condition_parsing(self):
+        from conditional_engine import parse_conditional_query
+        spec = parse_conditional_query("If India is in the top 10 places to visit, give me its rank, otherwise give me the next country")
+        self.assertIsNotNone(spec)
+        self.assertTrue(spec.is_conditional)
+        self.assertEqual(spec.condition_type, "MEMBERSHIP")
+        self.assertEqual(spec.operator, "in")
+        self.assertEqual(spec.target_value, 10)
+        self.assertIn("rank", spec.then_raw.lower())
+        self.assertIn("next country", spec.else_raw.lower())
+
+    def test_solve_conditional_numeric(self):
+        from conditional_engine import solve_conditional_query
+        res = solve_conditional_query("If the USA population is greater than 300 million, tell me its capital")
+        self.assertEqual(res["status"], "success")
+        self.assertTrue(res["is_conditional"])
+        self.assertTrue(res["condition_satisfied"])
+        self.assertEqual(res["executed_branch"], "THEN")
+        self.assertIn("capital", res["final_answer"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

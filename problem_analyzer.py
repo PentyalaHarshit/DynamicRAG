@@ -72,9 +72,87 @@ _PATTERNS = (
 )
 
 
+def detect_question_pattern(question: str) -> str:
+    """
+    Stage 1: Question Pattern / Operation Detector.
+    Returns one of: COUNT, IDENTITY, DEFINITION, PROCEDURE, COMPARISON,
+                    SELECTION_RANKING, TIME_CURRENT, CALCULATION, EXPLANATION,
+                    HISTORICAL_EVENT, LIST, GENERAL
+    """
+    q = question.strip().lower()
+
+    # 1. COUNT
+    if any(k in q for k in (
+        "how many", "how much", "number of", "count of", "total number", "how often",
+        "how frequently", "how many times", "how many people", "how many years",
+        "how many matches", "how many battles", "count"
+    )):
+        return "COUNT"
+
+    # 2. TIME / CURRENT (must fire before DEFINITION so 'temperature right now' is TIME_CURRENT)
+    if any(k in q for k in (
+        "right now", "currently", "current", "today", "tonight", "this week",
+        "this month", "recent", "recently", "latest", "news", "what happened today",
+        "what is happening", "as of today", "at present"
+    )):
+        return "TIME_CURRENT"
+
+    # 3. CALCULATION
+    if any(k in q for k in (
+        "calculate", "compute", "solve", "evaluate", "determine", "derive",
+        "differentiate", "integrate", "simplify", "factor", "solve for x",
+        "find the derivative", "find the integral"
+    )) or re.search(r'\b\d+\s*[\+\-\*/\^]\s*\d+\b', q):
+        return "CALCULATION"
+
+    # 4. IDENTITY / WHO
+    if any(q.startswith(k) for k in (
+        "who is", "who was", "who are", "who were", "who founded", "who created",
+        "who invented", "who developed", "who discovered", "who won", "who currently"
+    )) or "who is the current" in q:
+        return "IDENTITY"
+
+    # 5. COMPARISON (must fire before DEFINITION/RANKING for 'which is better, RAG or X')
+    if " vs " in q or "versus" in q or "difference between" in q or "compare" in q or "comparison of" in q or "better than" in q or "faster than" in q or "which is better" in q or re.search(r'\bbetter,?\s+.*\s+or\b', q):
+        return "COMPARISON"
+
+    # 6. SELECTION / RANKING
+    if any(k in q for k in (
+        "who is the best", "what is the best", "top ", "highest", "lowest", "largest",
+        "smallest", "most ", "least ", "maximum", "minimum", "ranking", "best"
+    )) or q.startswith("which "):
+        return "SELECTION_RANKING"
+
+    # 7. PROCEDURE / METHOD
+    if any(q.startswith(k) for k in (
+        "how can i", "how do i", "how to", "how does", "steps to", "way to",
+        "method to", "procedure for", "process of"
+    )):
+        return "PROCEDURE"
+
+    # 8. DEFINITION / MEANING
+    if any(q.startswith(k) for k in ("what is ", "what are ", "define ", "definition of ")) or ("what does" in q and "mean" in q) or "what is meant by" in q:
+        return "DEFINITION"
+
+    # 9. EXPLANATION / REASONING
+    if q.startswith("why ") or "explain why" in q or "how does it work" in q or "reason why" in q or "cause of" in q:
+        return "EXPLANATION"
+
+    # 10. HISTORICAL_EVENT
+    if any(q.startswith(k) for k in ("when did", "when was", "when were", "history of")) or any(k in q for k in ("war", "battle", "conflict", "invasion", "independence", "revolution", "who ruled")):
+        return "HISTORICAL_EVENT"
+
+    # 11. LIST
+    if q.startswith("list ") or "examples of" in q or "types of" in q:
+        return "LIST"
+
+    return "GENERAL"
+
+
 def analyze_problem(question: str) -> Dict[str, Any]:
     """Extract a compact, explainable problem representation before routing."""
     normalized = question.strip()
+    op_pattern = detect_question_pattern(normalized)
 
     # Derivation/proof complexity signals
     is_derivation = bool(re.search(
@@ -96,34 +174,34 @@ def analyze_problem(question: str) -> Dict[str, Any]:
             if is_derivation:
                 features.append("derivation")
 
-            # Complexity: derivations and GR/QM patterns are "very_high"
             complexity = (
                 "very_high"
                 if (is_derivation or subdomain in {"general_relativity", "theoretical_physics", "quantum_mechanics"})
                 else "medium"
             )
 
-            # Physics/math derivations need research retrieval, not direct LLM
             needs_research = domain in {"physics"} or is_derivation
 
             return {
-                "domain":          domain,
-                "subdomain":       subdomain,
-                "pattern":         pattern,
-                "features":        features,
-                "complexity":      complexity,
-                "needs_research":  needs_research,
-                "confidence":      0.95,
-                "reason":          f"Matched deterministic pattern: {pattern}.",
+                "operation_pattern": op_pattern,
+                "domain":            domain,
+                "subdomain":         subdomain,
+                "pattern":           pattern,
+                "features":          features,
+                "complexity":        complexity,
+                "needs_research":    needs_research,
+                "confidence":        0.95,
+                "reason":            f"Matched deterministic pattern: {pattern} ({op_pattern}).",
             }
 
     return {
-        "domain":         "general",
-        "subdomain":      "unknown",
-        "pattern":        "general_question",
-        "features":       [],
-        "complexity":     "medium",
-        "needs_research": False,
-        "confidence":     0.50,
-        "reason":         "No specialized deterministic pattern matched.",
+        "operation_pattern": op_pattern,
+        "domain":            "general",
+        "subdomain":         "unknown",
+        "pattern":           "general_question",
+        "features":          [],
+        "complexity":        "medium",
+        "needs_research":    False,
+        "confidence":        0.50,
+        "reason":            f"No specialized deterministic pattern matched ({op_pattern}).",
     }

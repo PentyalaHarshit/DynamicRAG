@@ -93,11 +93,12 @@ def unified_hybrid_funnel(
             "sources_used": [],
         }
     
-    # Step 2: Embedding filter → Top-5
+    # Step 2: Embedding filter → Top-K (scales with top_final)
+    emb_top_k = min(max(top_final + 3, 5), len(all_texts))
     top5_texts, top5_scores = filter_embedding_top_k(
         query=question,
         chunks=all_texts,
-        top_k=min(5, len(all_texts)),
+        top_k=emb_top_k,
     )
     
     # Rebuild hybrid chunks list with embedding scores
@@ -208,6 +209,7 @@ def unified_hybrid_funnel(
         "embedding_scores": top5_scores,
         "cross_encoder_final_count": len(top_ce_texts),
         "cross_encoder_scores": top_ce_scores,
+        "dqn_selected_index": 0,
         "sources_used": [hc.source for hc in top_hybrid_final],
         "hybrid_chunks": [
             {

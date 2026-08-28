@@ -48,6 +48,11 @@ Architecture (see graph.py for the full node/edge diagram):
 import sys
 import json
 
+# Force UTF-8 output so unicode chars (→, ─, etc.) in reasoning strings
+# don't crash on Windows cp1252 terminals.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from graph import run_pipeline
 
 
@@ -130,8 +135,10 @@ if __name__ == "__main__":
                    or fmeta.get("embedding_scores"))
     ce_scores   = (fmeta.get("top3_cross_encoder_scores")
                    or fmeta.get("cross_encoder_scores"))
+    gate_passed = fmeta.get("evidence_gate_passed", True)
     dqn_idx     = fmeta.get("dqn_selected_index")
-    gate_passed = fmeta.get("evidence_gate_passed")
+    if dqn_idx is None:
+        dqn_idx = 0 if gate_passed else None
 
     # Hybrid combiner path: show trad/web split
     trad_count = fmeta.get("trad_rag_count")

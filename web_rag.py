@@ -48,7 +48,7 @@ Crew Validator          Phase 2 — DQN (best available)
      ▼
 Return Result
 """
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import config
 from agents.react_agent import run_react_search
@@ -57,6 +57,7 @@ from agents.crew_validator import analyze_and_validate
 from reranker import funnel_phase1, funnel_phase2
 from answerability_agent import check_answerability
 from query_expander import expand_and_search
+from adaptive_retriever import derive_retrieval_spec, RetrievalSpec
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +107,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 def _build_chunk_pool(
     results,
     max_pool: int = 20,
+    chunk_words: int = 500,
 ) -> Tuple[List[str], List[str]]:
     """
     Builds the chunk pool fed into Phase 1 (embedding filter).
     Uses ThreadPoolExecutor for fast parallel web page retrieval.
+
+    chunk_words controls the size of each page-extracted chunk.
+    It is derived adaptively by derive_retrieval_spec() based on
+    the query intent and depth — not set by a fixed constant.
 
     Per result:
       1. Snippet added first.
@@ -128,11 +134,15 @@ def _build_chunk_pool(
                 all_sources.append(result.link)
 
     # 2. Fetch full article pages concurrently in parallel
+    # max_chunks per page scales with chunk_words: larger chunks -> fewer per page
+    max_chunks_per_page = max(2, min(5, 1200 // max(chunk_words, 1)))
     urls_to_fetch = [r.link for r in results[:4]]
 
     def _fetch_one(url: str):
         try:
-            return url, extract_chunks_from_page(url, chunk_words=500, max_chunks=3)
+            return url, extract_chunks_from_page(
+                url, chunk_words=chunk_words, max_chunks=max_chunks_per_page
+            )
         except Exception:
             return url, []
 
@@ -241,13 +251,20 @@ def _run_phase1_phase2(
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_web_rag(question: str, intent_type: str = "FACTOID") -> dict:
+def run_web_rag(
+    question: str,
+    intent_type: str = "FACTOID",
+    answer_style=None,
+    operation_pattern: Optional[str] = None,
+) -> dict:
     """
-    Full Web RAG pipeline.
+    Full Web RAG pipeline with adaptive retrieval granularity.
 
     Args:
-        question:    The original user question.
-        intent_type: From intent_detector (CURRENT_FACT embeds year in queries).
+        question:          The original user question.
+        intent_type:       From intent_detector (CURRENT_FACT embeds year in queries).
+        answer_style:      AnswerStyle dataclass from detect_answer_style() — controls depth.
+        operation_pattern: Operation pattern from problem_analyzer (e.g. "DEFINITION").
 
     Returns a dict with keys:
         success, best_chunk, top_sentences, rerank_score, funnel_meta,
@@ -255,7 +272,18 @@ def run_web_rag(question: str, intent_type: str = "FACTOID") -> dict:
         answer_found, answerability_reason, query_expansion_triggered.
     """
 
-    # ── Step 1: ReAct agent -> formulate search query -> fire search ──
+    # -- Step 0: Derive adaptive retrieval granularity from query meaning --
+    spec: RetrievalSpec = derive_retrieval_spec(
+        question=question,
+        answer_style=answer_style,
+        operation_pattern=operation_pattern,
+    )
+    print(
+        f"[Web RAG] Retrieval granularity: {spec.granularity} "
+        f"(chunk_words={spec.chunk_words}, max_chunks={spec.max_chunks})"
+    )
+
+    # -- Step 1: ReAct agent -> formulate search query -> fire search --
     trace = run_react_search(question, intent_type=intent_type)
 
     if not trace.results:
@@ -275,8 +303,10 @@ def run_web_rag(question: str, intent_type: str = "FACTOID") -> dict:
 
     print(f"[Web RAG] ReAct returned {len(trace.results)} results for query: '{question}'")
 
-    # ── Step 2: Fetch pages + build chunk pool (up to Top-10 results -> 20 chunks) ──
-    chunks, sources = _build_chunk_pool(trace.results, max_pool=20)
+    # -- Step 2: Fetch pages + build chunk pool with adaptive chunk_words --
+    chunks, sources = _build_chunk_pool(
+        trace.results, max_pool=20, chunk_words=spec.chunk_words
+    )
 
     if not chunks:
         return {

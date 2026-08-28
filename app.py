@@ -3,14 +3,20 @@ FastAPI Backend Web Application Server for Dynamic Hybrid RAG Pipeline
 Exposes REST APIs for query execution, MCP JSON-RPC tool testing, and pipeline telemetry.
 """
 
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Any, Dict, Optional
-import json
 import uvicorn
 
 from graph import run_pipeline
+from answer_style_detector import detect_answer_style
 from mcp_coding_rag import handle_mcp_request, MCP_TOOLS_MANIFEST
 
 
@@ -28,6 +34,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
+
+if (FRONTEND_DIST / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+
+
+@app.get("/")
+def read_root():
+    """Serves frontend single-page application."""
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+    return {
+        "status": "online",
+        "service": "Dynamic Hybrid RAG API Server",
+        "docs": "/docs",
+        "health": "/api/health"
+    }
 
 
 class QueryRequest(BaseModel):
@@ -78,12 +103,60 @@ def execute_query(req: QueryRequest):
             },
             "routing": res.get("route", "web_rag"),
             "route_meta": res.get("route_meta", {}),
+            "domain":            res.get("domain") or res.get("problem_analysis", {}).get("domain", "GENERAL"),
+            "operation_pattern": res.get("problem_analysis", {}).get("operation_pattern", "GENERAL"),
+            "answer_style":      res.get("answer_style") or detect_answer_style(req.query.strip()).to_dict(),
+            "sport":             res.get("sport", None),
+            "entities":          res.get("entities", None),
+            "statistic":         res.get("statistic", None),
+            "operation":         res.get("operation", None),
+            "time_scope":        res.get("time_scope", None),
+            "data_source":       res.get("data_source", None),
             "verification": {
                 "score": res.get("final_score", 1.0),
                 "dimensions": res.get("verification_dimensions", {}),
                 "passed": res.get("passed", True)
             },
             "sac_reward": res.get("sac_reward", 2.0),
+            "final_answer": res.get("final_answer", "")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class MultimodalQueryRequest(BaseModel):
+    query: str = ""
+    image_base64: Optional[str] = None
+    image_path: Optional[str] = None
+    pdf_path: Optional[str] = None
+
+
+@app.post("/api/query/multimodal")
+def execute_multimodal_query(req: MultimodalQueryRequest):
+    """Executes Multimodal Agent query pipeline (Text + Image + PDF)."""
+    if not req.query and not req.image_base64 and not req.image_path and not req.pdf_path:
+        raise HTTPException(status_code=400, detail="Provide at least query text or file/image payload.")
+
+    try:
+        res = run_pipeline(
+            question=req.query or "Analyze payload",
+            image_path=req.image_path,
+            image_base64=req.image_base64,
+            pdf_path=req.pdf_path
+        )
+        intent_obj = res.get("intent")
+        return {
+            "status": "success",
+            "query": req.query,
+            "routing": res.get("route", "multimodal"),
+            "intent": {
+                "type": intent_obj.intent_type if intent_obj else "MULTIMODAL",
+                "confidence": intent_obj.confidence if intent_obj else 0.95
+            },
+            "verification": {
+                "score": res.get("final_score", 1.0),
+                "passed": res.get("passed", True)
+            },
             "final_answer": res.get("final_answer", "")
         }
     except Exception as e:

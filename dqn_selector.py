@@ -50,9 +50,35 @@ W2 weight rationale (hidden_dim x 1):
 """
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+from enum import IntEnum
 import numpy as np
 
 from answerability_agent import _extract_persons, _extract_entities, _expected_entity_type, _extract_dates
+
+
+# ---------------------------------------------------------------------------
+# Retrieval Action Space (for multi-concept queries)
+# ---------------------------------------------------------------------------
+
+class RetrievalAction(IntEnum):
+    """
+    Actions the DQN retrieval agent can choose when coverage is insufficient.
+    Only active when requires_multi_retrieval=True.
+    """
+    RETRIEVE_PARAGRAPH = 0   # tight paragraph retrieval (default for simple queries)
+    EXPAND_CONTEXT     = 1   # include surrounding paragraphs for more context
+    RETRIEVE_SECTION   = 2   # full section-level retrieval
+    RETRIEVE_RELATED   = 3   # fetch a related concept section (cross-topic)
+    STOP               = 4   # evidence sufficient, proceed to generation
+
+
+_ACTION_NAMES = {
+    RetrievalAction.RETRIEVE_PARAGRAPH: "retrieve_paragraph",
+    RetrievalAction.EXPAND_CONTEXT:     "expand_context",
+    RetrievalAction.RETRIEVE_SECTION:   "retrieve_section",
+    RetrievalAction.RETRIEVE_RELATED:   "retrieve_related",
+    RetrievalAction.STOP:               "stop",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +97,9 @@ class RichState:
     answer_entity_found: float   # 1.0 / 0.0
     person_entity_found: float   # 1.0 / 0.0
     answerability_score: float   # 0.95 / 0.5 / 0.1
-    date_found: float            # 1.0 if any date/year present in chunk; 0.0 otherwise
+    date_found: float            # 1.0 if any date/year present in chunk
+    concept_coverage: float = 0.0   # dim 10: fraction of required concepts covered so far
+    uncovered_ratio: float = 1.0    # dim 11: fraction of concepts still missing
 
     def to_vector(self) -> List[float]:
         # question_entity_type is a string — excluded from the numeric vector
@@ -85,7 +113,9 @@ class RichState:
             float(self.answer_entity_found),         # dim 6
             float(self.person_entity_found),         # dim 7
             float(self.answerability_score),         # dim 8
-            float(self.date_found),                  # dim 9 (NEW)
+            float(self.date_found),                  # dim 9
+            float(self.concept_coverage),            # dim 10 (NEW: coverage ratio)
+            float(self.uncovered_ratio),             # dim 11 (NEW: uncovered ratio)
         ]
 
 
@@ -110,7 +140,7 @@ class RichDQNChunkSelector:
     # Answer Evidence Gate: chunk must reach this answerability_score
     EVIDENCE_THRESHOLD: float = 0.5
 
-    def __init__(self, state_dim: int = 10, hidden_dim: int = 16):
+    def __init__(self, state_dim: int = 12, hidden_dim: int = 16):
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
 
@@ -119,11 +149,12 @@ class RichDQNChunkSelector:
         self.b1 = np.zeros(hidden_dim)
 
         # W2 shape: (hidden_dim, 1)
-        # First 10 entries correspond to the 10 state dimensions (9 original + date_found).
-        # Weights sum to ~1.22 before hidden-layer mixing; date_found gets 0.06.
+        # Dims 0-9: original 10 dims. Dims 10-11: coverage signals.
+        # concept_coverage (0.12): reward signal for multi-concept completeness.
+        # uncovered_ratio (0.08): penalty signal for missing concepts.
         self.W2 = np.array(
-            [0.09, 0.27, 0.04, 0.03, 0.07, 0.09, 0.19, 0.15, 0.23, 0.06]
-            + [0.0] * (hidden_dim - 10)
+            [0.08, 0.24, 0.04, 0.03, 0.06, 0.08, 0.17, 0.13, 0.20, 0.05, 0.12, 0.08]
+            + [0.0] * (hidden_dim - 12)
         ).reshape(hidden_dim, 1)
         self.b2 = np.array([0.05])
 
@@ -362,6 +393,8 @@ class RichDQNChunkSelector:
                 "person_entity_found":   round(s.person_entity_found, 3),
                 "date_found":            round(s.date_found, 3),
                 "answerability_score":   round(s.answerability_score, 3),
+                "concept_coverage":      round(s.concept_coverage, 3),
+                "uncovered_ratio":       round(s.uncovered_ratio, 3),
             }
             for s in rich_states
         ]
@@ -382,6 +415,45 @@ class RichDQNChunkSelector:
 # ---------------------------------------------------------------------------
 
 _rich_dqn_selector = RichDQNChunkSelector()
+
+
+def select_retrieval_action(
+    coverage_score: float,
+    uncovered_concepts: list,
+    requires_multi_retrieval: bool,
+    coverage_threshold: float = 0.75,
+) -> RetrievalAction:
+    """
+    Selects the next retrieval action based on current coverage state.
+    Only meaningful for multi-concept queries (requires_multi_retrieval=True).
+    For simple queries, always returns STOP (chunk selection path is used instead).
+
+    Action selection heuristic:
+      coverage >= threshold          → STOP (sufficient evidence)
+      uncovered >= 4 concepts        → RETRIEVE_SECTION (need broad context)
+      uncovered >= 2 concepts        → EXPAND_CONTEXT (expand current evidence)
+      uncovered == 1 concept         → RETRIEVE_RELATED (fetch specific related section)
+      coverage ~threshold (< 0.15)   → RETRIEVE_PARAGRAPH (targeted tight retrieval)
+    """
+    if not requires_multi_retrieval:
+        return RetrievalAction.STOP
+
+    if coverage_score >= coverage_threshold:
+        action = RetrievalAction.STOP
+    elif len(uncovered_concepts) >= 4:
+        action = RetrievalAction.RETRIEVE_SECTION
+    elif len(uncovered_concepts) >= 2:
+        action = RetrievalAction.EXPAND_CONTEXT
+    elif len(uncovered_concepts) == 1:
+        action = RetrievalAction.RETRIEVE_RELATED
+    else:
+        action = RetrievalAction.RETRIEVE_PARAGRAPH
+
+    print(
+        f"[DQN RetrievalAction] {_ACTION_NAMES[action]} | "
+        f"coverage={coverage_score:.2f} | uncovered={uncovered_concepts}"
+    )
+    return action
 
 
 def select_top1_rich_dqn(

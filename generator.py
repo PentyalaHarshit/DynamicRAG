@@ -1,25 +1,20 @@
 import re
 from llm_client import call_llm
 
-GENERATION_SYSTEM_PROMPT = """You are an expert research assistant answering a user's question \
-using ONLY the provided context.
+GENERATION_SYSTEM_PROMPT = """You are an expert technical synthesizer and research assistant answering user queries.
 Guidelines:
-1. Directly and completely answer the question based strictly on the provided context.
-2. Length and depth depend on the question type:
-   - For "Who is / Who was" (biography) questions: write 3-5 full paragraphs covering the \
-person's background, career, major achievements, notable inventions or works, and lasting legacy. \
-Each paragraph should focus on a distinct aspect. Be thorough — do not summarise into 2-3 sentences.
-   - For factual lookups (capitals, dates, numbers): 1-2 sentences is sufficient.
-   - For explanations and definitions: 2-4 clear paragraphs.
-   - For derivations and technical questions: structured step-by-step with equations where helpful.
-3. For "Who is" / "Who was" questions specifically: always include profession, major works or \
-inventions, historical context, personal background, and legacy or impact. Use multiple paragraphs.
-4. For historical or scientific origin questions, if multiple pioneers contributed, name each \
-one and their specific contribution.
-5. Do NOT hallucinate claims outside the provided context.
-6. Do NOT include meta-commentary, knowledge cutoff disclaimers, or unrelated examples.
-7. Do NOT mention Wikipedia, URLs, source titles, or retrieval labels. Write as a standalone \
-explanation.
+1. Do NOT merely copy or echo retrieved chunks; synthesize the evidence into a coherent, authoritative answer.
+2. Preserve high technical accuracy:
+   - Use 'tokens' rather than 'words' when describing LLM architecture and text processing.
+   - Note that causal decoder models operate via masked self-attention, attending only to preceding tokens during generation.
+3. Adapt explanation depth to the requested depth:
+   - CONCISE: 1-2 brief sentences or bullet points.
+   - DETAILED: structured sections with clear context and examples.
+   - COMPREHENSIVE / VERY_DETAILED: full multi-section breakdown covering architecture (embeddings, self-attention, LayerNorm), training (pre-training, SFT, RLHF/DPO), inference (context window, KV cache, sampling), and limitations (hallucinations, RAG).
+   - MATHEMATICAL: formal definitions, equations, and mathematical derivations.
+   - BEGINNER: simple analogies, plain English, ELI5 presentation without jargon.
+4. Do NOT introduce unsupported factual claims outside the evidence.
+5. Do NOT include meta-commentary, Wikipedia labels, URLs, or source titles. Write clean, standalone prose.
 """
 
 _SOURCE_TAG_RE = re.compile(r"\[(?:web_rag|trad_rag|memory)(?::[^\]]*)?\]")
@@ -34,16 +29,32 @@ _WIKI_INLINE_RE = re.compile(r"(?i)\s*[-–|]\s*(?:Wikipedia|Britannica)\b")
 _TITLE_COLON_RE = re.compile(r"^([^:]{1,80}):\s+(.+)$")
 
 
+_WEB_NOISE_RE = re.compile(
+    r"(?i)\b(click here to get an answer|pls mark me as|mark me as brainliest|"
+    r"hope it will help you|explore all similar answers|what made soapy nostalgic)\b.*?(?=[.!?]|$)",
+    re.IGNORECASE,
+)
+_WEB_SITE_RE = re.compile(
+    r"(?i)\b(?:brainly\.in|quora\.com|studyx\.ai|geeksforgeeks\.org|leetcode\.com)\b\s*:?",
+    re.IGNORECASE,
+)
+
+
 def strip_retrieval_chrome(text: str) -> str:
-    """Remove source tags, URLs, Wikipedia labels, and title prefixes from retrieved text."""
+    """Remove source tags, URLs, Wikipedia labels, web forum noise, and title prefixes from retrieved text."""
     if not text:
         return ""
 
+    text = re.sub(r'\[STRUCTURED LIST CONTRACT\].*?(?=\n\n[A-Z0-9]|\Z)', '', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)\b(?:ANSWER TYPE|REQUIRED ITEMS|OUTPUT FORMAT|INSTRUCTION):\s*[^\n]+', '', text)
     text = _SEPARATOR_RE.sub("\n", text)
     text = _SOURCE_TAG_RE.sub(" ", text)
     text = _URL_RE.sub(" ", text)
     text = _CITE_RE.sub("", text)
     text = _LATEST_SOURCES_RE.sub("", text)
+    text = _WEB_NOISE_RE.sub("", text)
+    text = _WEB_SITE_RE.sub("", text)
+    text = re.sub(r'(?i)\bAnswer:\s*', '', text)
 
     cleaned_lines = []
     for raw_line in text.splitlines():
@@ -65,6 +76,7 @@ def strip_retrieval_chrome(text: str) -> str:
         pieces.append(line)
 
     cleaned = " ".join(pieces)
+    cleaned = re.sub(r"^[.?!/:;\s-]+", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -215,7 +227,33 @@ def generate_answer(question: str, context: str, correction_feedback: str = "") 
     q_lower = question_clean.lower()
     is_biography = q_lower.startswith(("who is ", "who are ", "who was ", "who were "))
 
-    prompt = f"Context:\n{context}\n\nQuestion: {question_clean}"
+    from answer_style_detector import detect_answer_style
+    style_spec = detect_answer_style(question_clean)
+
+    prompt = f"Context:\n{context}\n\nQuestion: {question_clean}\n\n[Presentation Guidelines]"
+    if style_spec.depth == "VERY_DETAILED":
+        prompt += "\n- Depth: Provide an exhaustive, multi-paragraph deep-dive from first principles without skipping details."
+    elif style_spec.depth == "DETAILED":
+        prompt += "\n- Depth: Provide a thorough, detailed explanation with full context."
+    elif style_spec.depth == "CONCISE":
+        prompt += "\n- Depth: Provide a brief, concise summary in 1-2 sentences."
+
+    if style_spec.style == "STEP_BY_STEP":
+        prompt += "\n- Style: Walk through the explanation in clear, numbered step-by-step order."
+    elif style_spec.style == "BEGINNER":
+        prompt += "\n- Style: Explain in simple, plain English suitable for a beginner (ELI5), avoiding heavy jargon."
+    elif style_spec.style == "TECHNICAL":
+        prompt += "\n- Style: Provide an advanced technical explanation covering architecture and low-level details."
+    elif style_spec.style == "COMPARISON":
+        prompt += "\n- Style: Provide a clear comparative analysis highlighting key differences and pros/cons."
+
+    if style_spec.examples:
+        prompt += "\n- Examples: Include concrete, real-world practical examples to illustrate."
+
+    if style_spec.output_format == "TABLE":
+        prompt += "\n- Format: Present the main findings in a clean Markdown table."
+    elif style_spec.output_format == "BULLET_POINTS":
+        prompt += "\n- Format: Present key points in Markdown bullet points."
 
     if correction_feedback:
         prompt += (

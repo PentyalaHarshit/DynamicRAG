@@ -59,6 +59,8 @@ _NAV_PHRASES = re.compile(
     r'privacy\s+policy|terms\s+of\s+use|cookie\s+policy|'
     r'creative\s+commons|wikimedia\s+foundation|'
     r'edit\s+source|view\s+history|talk\s+page|'
+    r'tiktok\s+video|generated\s+by\s+ai|#capcut|#midjourney|#aiart|'
+    r'please\s+mark\s+me\s+as\s+brainliest|explore\s+all\s+similar\s+answers|'
     r'search\s+wikipedia|log\s+in|create\s+account)\b',
     re.IGNORECASE,
 )
@@ -400,14 +402,23 @@ def _duckduckgo_search(query: str, num_results: int = 10) -> List[SearchResult]:
             except ImportError:
                 from duckduckgo_search import DDGS
 
+            _JUNK_DOMAINS = re.compile(
+                r'(?i)\b(?:tiktok\.com|pinterest\.com|instagram\.com|facebook\.com|'
+                r'twitter\.com|x\.com|youtube\.com|dailymotion\.com|wonderslist\.com|'
+                r'solatatech\.com|therichest\.com|toptenz\.net)\b'
+            )
             with DDGS() as ddgs:
-                raw_results = list(ddgs.text(query, max_results=num_results))
+                raw_results = list(ddgs.text(query, max_results=num_results + 5))
                 for item in raw_results:
                     title = item.get("title", "")
                     link = item.get("href", "")
                     snippet = item.get("body", "")
+                    if _JUNK_DOMAINS.search(link) or _JUNK_DOMAINS.search(title):
+                        continue
                     if title and snippet:
                         results.append(SearchResult(title=title, link=link, snippet=snippet))
+                    if len(results) >= num_results:
+                        break
 
         if results:
             print(f"[Search Tool] DDGS live web search returned {len(results)} web results for '{query}'")
@@ -447,8 +458,12 @@ def _duckduckgo_search(query: str, num_results: int = 10) -> List[SearchResult]:
                         if "uddg" in parsed:
                             link = parsed["uddg"][0]
                     snippet = a_snippet.get_text().strip() if a_snippet else ""
+                    if _JUNK_DOMAINS.search(link) or _JUNK_DOMAINS.search(title):
+                        continue
                     if title and snippet:
                         results.append(SearchResult(title=title, link=link, snippet=snippet))
+                    if len(results) >= num_results:
+                        break
     except Exception:
         pass
 
@@ -492,10 +507,22 @@ def _wikipedia_search(query: str, num_results: int = 10) -> List[SearchResult]:
 
 def _fallback_search(query: str, num_results: int = 10) -> List[SearchResult]:
     """
-    Combined fallback search: tries DDGS live web search first,
-    only using Wikipedia if live web search yields 0 results.
+    Combined fallback search: queries DDGS and includes authoritative Wikipedia articles
+    for topic depth and reliability.
     """
     ddg_results = _duckduckgo_search(query, num_results)
+    
+    # For ranking, comparison, or military queries, enrich pool with authoritative Wikipedia sources
+    if any(w in query.lower() for w in ("special forces", "military", "best", "strongest", "top", "compare")):
+        wiki_results = _wikipedia_search(query, num_results=5)
+        combined = list(ddg_results)
+        seen_links = {r.link for r in combined}
+        for wr in wiki_results:
+            if wr.link not in seen_links:
+                seen_links.add(wr.link)
+                combined.append(wr)
+        return combined[:num_results + 3]
+
     if ddg_results:
         return ddg_results
 

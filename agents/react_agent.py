@@ -84,6 +84,24 @@ def run_react_search(
 
         return trace
 
+    # ── Military History path: target Wikipedia, Britannica, World History ──
+    if intent_type == "MILITARY_HISTORY":
+        base_q = _clean_query(question)
+        clean_q = re.sub(r'\b(how many|how much|what is the number of|tell me about)\b', '', base_q, flags=re.IGNORECASE).strip()
+        query = f"{clean_q} war military battles site:en.wikipedia.org OR site:britannica.com OR site:worldhistory.org OR site:historyofwar.org"
+        trace.thoughts.append("Targeting Wikipedia, Britannica, and military history sources.")
+        trace.queries_used.append(query)
+        trace.results = google_search(query)
+        print(f"[ReAct] Military history search (intent=MILITARY_HISTORY): '{query}'")
+
+        if not trace.results:
+            fallback_results = _fallback_search(query, num_results=10)
+            trace.results.extend(fallback_results)
+            if fallback_results:
+                print(f"[ReAct] Live web search fallback: {len(fallback_results)} results retrieved.")
+
+        return trace
+
     # ── Fast path: skip LLM, search directly ────────────────────────────
     if intent_type in _DIRECT_SEARCH_INTENTS:
         query = _clean_query(question)

@@ -6,14 +6,17 @@ import {
 } from 'lucide-react';
 import './index.css';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = '';
 
 const SAMPLE_QUERIES = [
-  "Write a python solution for Leetcode 3 Longest Substring Without Repeating Characters",
-  "Write a python solution for Leetcode 1 Two Sum",
+  "Top 10 places to visit in the world",
+  "List of top 10 Best Special Forces in the world",
+  "Top 5 performing stocks",
+  "Top 5 NBA players",
+  "How many battles did India win against Pakistan?",
   "Convert 100 USD to EUR",
   "What is the weather in London right now?",
-  "Explain the difference between REST API and GraphQL"
+  "Write a python solution for Leetcode 3 Longest Substring Without Repeating Characters"
 ];
 
 export default function App() {
@@ -45,19 +48,45 @@ export default function App() {
     }
   };
 
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setSelectedFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setFilePreview(reader.result);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSearch = async (inputQuery) => {
     const targetQ = inputQuery || query;
-    if (!targetQ.trim()) return;
+    if (!targetQ.trim() && !selectedFile) return;
 
     setLoading(true);
     setError(null);
     setResult(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/query`, {
+      let endpoint = `${API_BASE}/api/query`;
+      let payload = { query: targetQ };
+
+      if (selectedFile || filePreview) {
+        endpoint = `${API_BASE}/api/query/multimodal`;
+        payload = {
+          query: targetQ,
+          image_base64: filePreview,
+          pdf_path: selectedFile?.name?.endsWith('.pdf') ? selectedFile.name : null
+        };
+      }
+
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: targetQ })
+        body: JSON.stringify(payload)
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}: Server Error`);
@@ -149,21 +178,39 @@ export default function App() {
               <Search size={20} color="#38bdf8" /> Query Execution Console
             </h2>
 
-            <form onSubmit={(e) => { e.preventDefault(); handleSearch(); }} style={{ display: 'flex', gap: '12px', marginBottom: '20px' }}>
+            <form onSubmit={(e) => { e.preventDefault(); handleSearch(); }} style={{ display: 'flex', gap: '12px', marginBottom: '20px', alignItems: 'center' }}>
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Ask any question, LeetCode problem, currency rate, or weather..."
+                placeholder="Ask any text query or upload an Image (Calculus/Physics/Chart) or PDF Document..."
                 style={{ flex: 1, padding: '16px 20px', borderRadius: '12px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', fontSize: '15px', outline: 'none' }}
               />
+
+              <label style={{ padding: '16px 20px', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.1)', border: '1px dashed #38bdf8', color: '#38bdf8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
+                📷 {selectedFile ? selectedFile.name.slice(0, 18) + '...' : 'Upload Image / PDF'}
+                <input type="file" accept="image/*,.pdf" onChange={handleFileUpload} style={{ display: 'none' }} />
+              </label>
+
               <button
                 type="submit"
                 disabled={loading}
-                style={{ padding: '0 32px', borderRadius: '12px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', fontSize: '15px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.7 : 1 }}>
+                style={{ padding: '0 32px', height: '54px', borderRadius: '12px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', fontSize: '15px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.7 : 1 }}>
                 {loading ? <RefreshCw className="animate-spin" size={18} /> : <Play size={18} />} Run Query
               </button>
             </form>
+
+            {filePreview && (
+              <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px', background: 'rgba(56, 189, 248, 0.08)', padding: '10px 16px', borderRadius: '10px', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                <span style={{ fontSize: '12px', color: '#38bdf8', fontWeight: '600' }}>Uploaded Payload Preview:</span>
+                {selectedFile?.type?.startsWith('image/') ? (
+                  <img src={filePreview} alt="upload preview" style={{ height: '40px', borderRadius: '6px', border: '1px solid #38bdf8' }} />
+                ) : (
+                  <span style={{ fontSize: '13px', color: '#f8fafc' }}>📄 {selectedFile?.name}</span>
+                )}
+                <button onClick={() => { setSelectedFile(null); setFilePreview(null); }} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#f43f5e', cursor: 'pointer', fontSize: '12px', fontWeight: '700' }}>Remove ✕</button>
+              </div>
+            )}
 
             {/* Quick Sample Chips */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
@@ -235,22 +282,41 @@ export default function App() {
                     <Layers size={18} /> Domain Router Telemetry
                   </h4>
                   
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span style={{ color: '#94a3b8' }}>Detected Intent:</span>
-                      <span style={{ fontWeight: '700', color: '#38bdf8' }}>{result.intent.type}</span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span style={{ color: '#94a3b8' }}>Confidence:</span>
-                      <span style={{ fontWeight: '600', color: '#34d399' }}>{(result.intent.confidence * 100).toFixed(0)}%</span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span style={{ color: '#94a3b8' }}>Route Target:</span>
-                      <span style={{ fontWeight: '600', color: '#c084fc' }}>{result.routing}</span>
-                    </div>
-                  </div>
+                  {/* Domain colour helper */}
+                  {(() => {
+                    const domainColors = {
+                      SPORTS:           '#f59e0b',
+                      MILITARY_HISTORY: '#ef4444',
+                      GENERAL:          '#38bdf8',
+                    };
+                    const domainColor = domainColors[result.domain] || '#38bdf8';
+                    const rows = [
+                      { label: 'Question Pattern', value: result.operation_pattern || 'GENERAL', color: '#a78bfa', bold: true },
+                      { label: 'Detected Domain',  value: result.domain || 'GENERAL',            color: domainColor, bold: true },
+                      result.answer_style?.depth && { label: 'Response Depth', value: result.answer_style.depth, color: '#38bdf8', bold: true },
+                      result.answer_style?.style && { label: 'Answer Style',   value: result.answer_style.style, color: '#f472b6' },
+                      result.answer_style?.output_format && { label: 'Output Format',  value: result.answer_style.output_format, color: '#34d399' },
+                      result.answer_style?.technical_level && { label: 'Tech Level',  value: result.answer_style.technical_level, color: '#fbbf24' },
+                      result.sport      && { label: 'Sport',      value: result.sport,      color: '#38bdf8' },
+                      result.entities   && { label: 'Entities',   value: result.entities,   color: '#34d399' },
+                      result.statistic  && { label: 'Statistic',  value: result.statistic,  color: '#f472b6' },
+                      result.operation  && { label: 'Operation',  value: result.operation,  color: '#fbbf24' },
+                      result.time_scope && { label: 'Time Scope', value: result.time_scope, color: '#a78bfa' },
+                      { label: 'Detected Intent', value: result.intent?.type || '—', color: '#38bdf8', bold: true },
+                      { label: 'Route Target',    value: result.routing || '—',      color: '#c084fc' },
+                      { label: 'Data Source',     value: result.data_source || 'Web RAG', color: '#38bdf8' },
+                    ].filter(Boolean);
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        {rows.map((r, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', alignItems: 'center' }}>
+                            <span style={{ color: '#94a3b8' }}>{r.label}:</span>
+                            <span style={{ fontWeight: r.bold ? '700' : '600', color: r.color, maxWidth: '55%', textAlign: 'right', wordBreak: 'break-word' }}>{r.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </section>
 
                 {/* Multi-Stage RAG Funnel Progress */}
