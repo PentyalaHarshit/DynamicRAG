@@ -80,7 +80,10 @@ import sympy as sp
 
 from langgraph.graph import StateGraph, END
 
-# ── Pipeline modules (unchanged — same imports as main.py) ──────────────
+from answer_type_agent import detect_answer_type, format_yes_no_response
+from agents.math_agent import solve_math_query
+from agents.physics_agent import solve_physics_query
+from agents.news_agent import fetch_live_news
 from intent_detector import detect_intent as _detect_intent, IntentResult
 from vector_store import TraditionalRAG
 from reranker import multi_stage_funnel
@@ -435,7 +438,20 @@ def node_direct_llm(state: AgentState) -> AgentState:
     )
 
     print("[Graph] Direct LLM route: generating without retrieval...")
-    answer = _solve_basic_math(question) if state.get("intent_type") == "MATH" else None
+    answer = None
+    q_low = question.lower()
+    if "electron" in q_low or "accelerat" in q_low or "velocity" in q_low:
+        phys_res = solve_physics_query(question)
+        if phys_res["status"] == "success":
+            answer = phys_res["final_answer"]
+
+    if answer is None:
+        math_res = solve_math_query(question)
+        if math_res["status"] == "success":
+            answer = math_res["final_answer"]
+
+    if answer is None:
+        answer = _solve_basic_math(question) if state.get("intent_type") == "MATH" else None
     if answer is None:
         answer = call_llm(system=system, prompt=question)
 

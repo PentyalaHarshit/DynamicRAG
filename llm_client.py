@@ -302,6 +302,22 @@ def _extract_answer_from_context(question: str, context: str) -> str:
                 "The provided documents only contain a high-level qualitative overview."
             )
 
+    from answer_type_agent import detect_answer_type, format_yes_no_response
+    ans_type = detect_answer_type(question)
+    if ans_type.answer_type == "YES_NO":
+        return format_yes_no_response(question, context)
+    elif ans_type.answer_type == "CALCULATION":
+        q_lower = question.lower()
+        if any(k in q_lower for k in ("electron", "accelerat", "velocity", "lorentz", "physics")):
+            from agents.physics_agent import solve_physics_query
+            p_res = solve_physics_query(question)
+            if p_res["status"] == "success":
+                return p_res["final_answer"]
+        from agents.math_agent import solve_math_query
+        m_res = solve_math_query(question)
+        if m_res["status"] == "success":
+            return m_res["final_answer"]
+
     q_lower = question.lower()
     if any(w in q_lower for w in ("leetcode", "geeksforgeeks", "codeforces", "solution", "python solution", "quicksort", "merge sort", "mergesort", "binary search", "two sum", "longest substring", "linked list")):
         coding_ans = _format_coding_solution(question, context)

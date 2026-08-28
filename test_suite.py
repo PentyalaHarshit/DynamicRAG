@@ -168,5 +168,39 @@ class TestMCPCodingRAG(unittest.TestCase):
         self.assertGreater(res["chunks_retrieved"], 0)
 
 
+class TestAnswerTypeAndReasoningAgents(unittest.TestCase):
+    """Unit tests for Answer-Type Detector, Math Agent, and Physics Agent"""
+
+    def test_answer_type_detection(self):
+        from answer_type_agent import detect_answer_type
+        r1 = detect_answer_type("Is Asim Munir a Field Marshal?")
+        self.assertEqual(r1.answer_type, "YES_NO")
+
+        r2 = detect_answer_type("What is the second derivative of e^(x^2)sin(3x^2+1)?")
+        self.assertEqual(r2.answer_type, "CALCULATION")
+
+        r3 = detect_answer_type("An electron is accelerated through 2 MV. Calculate its relativistic velocity.")
+        self.assertEqual(r3.answer_type, "CALCULATION")
+
+    def test_math_agent_symbolic_derivation(self):
+        from agents.math_agent import solve_math_query
+        res = solve_math_query("What is the second derivative of e^(x^2)sin(3x^2+1)?")
+        self.assertEqual(res["status"], "success")
+        self.assertIn("Symbolic Solver", res["agent"])
+        self.assertIn("f''(x)", res["final_answer"])
+
+    def test_physics_agent_relativity(self):
+        from agents.physics_agent import solve_physics_query
+        res = solve_physics_query("An electron is accelerated through 2 MV. Calculate its relativistic velocity.")
+        self.assertEqual(res["status"], "success")
+        self.assertAlmostEqual(res["lorentz_gamma"], 4.9139, places=3)
+        self.assertAlmostEqual(res["beta"], 0.9791, places=3)
+
+    def test_yes_no_formatting(self):
+        from answer_type_agent import format_yes_no_response
+        ans = format_yes_no_response("Is Asim Munir a Field Marshal?", "Gen Asim Munir was promoted to Field Marshal in 2025.")
+        self.assertTrue(ans.startswith("Yes."))
+
+
 if __name__ == "__main__":
     unittest.main()
