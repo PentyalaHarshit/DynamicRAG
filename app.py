@@ -65,11 +65,12 @@ class MCPRequest(BaseModel):
     arguments: Optional[Dict[str, Any]] = None
 
 
+@app.get("/health")
 @app.get("/api/health")
 def health_check():
     """Returns system health and active model configuration."""
     return {
-        "status": "online",
+        "status": "healthy",
         "service": "Dynamic Hybrid RAG Engine",
         "version": "2.0.0",
         "components": {

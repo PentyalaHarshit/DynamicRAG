@@ -1,0 +1,19 @@
+version: 1.0
+runtime: python311
+build:
+  commands:
+    build:
+      - apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-eng libgomp1
+      - pip install -r requirements.txt
+run:
+  command: uvicorn app:app --host 0.0.0.0 --port 8000
+  network:
+    port: 8000
+    env: PORT
+  env:
+    - name: GROQ_API_KEY
+      value: ""
+    - name: GOOGLE_API_KEY
+      value: ""
+    - name: GOOGLE_CSE_ID
+      value: ""
