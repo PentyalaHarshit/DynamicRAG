@@ -1,32 +1,51 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Terminal, Search, Cpu, Zap, ShieldCheck, Code2, Play, 
   Layers, CheckCircle2, AlertCircle, ArrowRight, RefreshCw, 
-  Globe, Database, Server, Copy, Check, Sparkles
+  Globe, Database, Server, Copy, Check, Sparkles, Image as ImageIcon,
+  MessageSquare, Send, Trash2, ChevronDown, ChevronUp, Paperclip, X,
+  Maximize2
 } from 'lucide-react';
 import './index.css';
 
 const API_BASE = '';
 
 const SAMPLE_QUERIES = [
+  "What does AI stand for? 1 of 5 A Automated Information B Applied Interface C Advanced Internet D Artificial Intelligence",
+  "A composite B+ tree index exists on (customer_id, order_date). Which query can most directly benefit from the index's leftmost-prefix property? A WHERE customer_id = 42 AND order_date >= '2026-01-01' B WHERE YEAR(order_date) = 2026 C WHERE customer_id + 1 = 42 D WHERE order_date >= '2026-01-01'",
+  "A relation has functional dependencies A → B and B → C, with A as a candidate key. Which statement best describes the dependency A → C? A It violates reflexivity B It follows by transitivity C It cannot be inferred from the given dependencies D It follows only if C is a candidate key",
   "Top 10 places to visit in the world",
-  "List of top 10 Best Special Forces in the world",
-  "Top 5 performing stocks",
-  "Top 5 NBA players",
-  "How many battles did India win against Pakistan?",
   "Convert 100 USD to EUR",
-  "What is the weather in London right now?",
   "Write a python solution for Leetcode 3 Longest Substring Without Repeating Characters"
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('pipeline');
+  const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'pipeline' | 'mcp'
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState(null);
   const [serverHealth, setServerHealth] = useState(null);
+
+  // Chat conversation state
+  const [messages, setMessages] = useState([
+    {
+      id: 'init-1',
+      sender: 'assistant',
+      text: "👋 Welcome to **Dynamic Hybrid RAG 2.0 Chatbot**!\n\nYou can ask any question, search real-time data, solve complex database / ML quiz questions, or **paste screenshots / photos directly (`Ctrl+V`)** to analyze equations, code, diagrams, or quiz questions!",
+      image: null,
+      telemetry: null,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    }
+  ]);
+  const [pastedImage, setPastedImage] = useState(null); // { file, preview, name, size }
+  const [isDragging, setIsDragging] = useState(false);
+  const [expandedTelemetry, setExpandedTelemetry] = useState({});
+  const [modalImage, setModalImage] = useState(null);
+
+  const messagesEndRef = useRef(null);
+  const chatInputRef = useRef(null);
 
   // MCP Tester state
   const [mcpTool, setMcpTool] = useState('search_leetcode_solution');
@@ -38,6 +57,10 @@ export default function App() {
     checkHealth();
   }, []);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
   const checkHealth = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/health`);
@@ -48,23 +71,137 @@ export default function App() {
     }
   };
 
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [filePreview, setFilePreview] = useState(null);
+  // ── Clipboard Paste Handler (Ctrl+V) ──────────────────────────────────────
+  const handlePaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        const blob = items[i].getAsFile();
+        if (blob) {
+          processImageFile(blob);
+          e.preventDefault();
+          break;
+        }
+      }
+    }
+  };
+
+  // ── File Selection & Drag-Drop ───────────────────────────────────────────
+  const processImageFile = (file) => {
     if (!file) return;
-    setSelectedFile(file);
     const reader = new FileReader();
     reader.onloadend = () => {
-      setFilePreview(reader.result);
+      setPastedImage({
+        file: file,
+        preview: reader.result,
+        name: file.name || `pasted_image_${Date.now()}.png`,
+        size: `${(file.size / 1024).toFixed(1)} KB`
+      });
     };
     reader.readAsDataURL(file);
   };
 
-  const handleSearch = async (inputQuery) => {
+  const handleFileInputChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processImageFile(file);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.type.startsWith('image/') || file.name.endsWith('.pdf'))) {
+      processImageFile(file);
+    }
+  };
+
+  // ── Submit Query (Chat Mode) ─────────────────────────────────────────────
+  const handleSendChatMessage = async (overridePrompt) => {
+    const promptToSend = overridePrompt !== undefined ? overridePrompt : query;
+    if (!promptToSend.trim() && !pastedImage) return;
+
+    const currentImage = pastedImage;
+    const userMsgId = `user-${Date.now()}`;
+    const userMsg = {
+      id: userMsgId,
+      sender: 'user',
+      text: promptToSend.trim(),
+      image: currentImage?.preview || null,
+      imageName: currentImage?.name || null,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setQuery('');
+    setPastedImage(null);
+    setLoading(true);
+    setError(null);
+
+    try {
+      let endpoint = `${API_BASE}/api/query`;
+      let payload = { query: promptToSend.trim() };
+
+      if (currentImage?.preview) {
+        endpoint = `${API_BASE}/api/query/multimodal`;
+        payload = {
+          query: promptToSend.trim(),
+          image_base64: currentImage.preview,
+          pdf_path: currentImage.file?.name?.endsWith('.pdf') ? currentImage.file.name : null
+        };
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}: Server Error`);
+      const data = await res.json();
+      setResult(data);
+
+      const assistantMsg = {
+        id: `assistant-${Date.now()}`,
+        sender: 'assistant',
+        text: data.final_answer || 'No response generated.',
+        telemetry: data,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
+    } catch (err) {
+      const errMsg = {
+        id: `assistant-${Date.now()}`,
+        sender: 'assistant',
+        text: `⚠️ **Execution Error**: ${err.message || 'Failed to connect to backend server.'}`,
+        telemetry: null,
+        isError: true,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      setMessages((prev) => [...prev, errMsg]);
+    } finally {
+      setLoading(false);
+      chatInputRef.current?.focus();
+    }
+  };
+
+  // ── Submit Query (Pipeline Console Mode) ──────────────────────────────────
+  const handlePipelineSearch = async (inputQuery) => {
     const targetQ = inputQuery || query;
-    if (!targetQ.trim() && !selectedFile) return;
+    if (!targetQ.trim() && !pastedImage) return;
 
     setLoading(true);
     setError(null);
@@ -74,12 +211,12 @@ export default function App() {
       let endpoint = `${API_BASE}/api/query`;
       let payload = { query: targetQ };
 
-      if (selectedFile || filePreview) {
+      if (pastedImage?.preview) {
         endpoint = `${API_BASE}/api/query/multimodal`;
         payload = {
           query: targetQ,
-          image_base64: filePreview,
-          pdf_path: selectedFile?.name?.endsWith('.pdf') ? selectedFile.name : null
+          image_base64: pastedImage.preview,
+          pdf_path: pastedImage.file?.name?.endsWith('.pdf') ? pastedImage.file.name : null
         };
       }
 
@@ -119,308 +256,512 @@ export default function App() {
     }
   };
 
-  const copyToClipboard = (text) => {
+  const copyToClipboard = (text, idx) => {
     navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedIndex(idx);
+    setTimeout(() => setCopiedIndex(null), 2000);
   };
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 16px' }}>
+    <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '20px 16px', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       
       {/* ── Header Bar ────────────────────────────────────────────────────────── */}
-      <header className="glass-panel" style={{ padding: '20px 32px', marginBottom: '28px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ background: 'linear-gradient(135deg, #38bdf8, #818cf8)', width: '48px', height: '48px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 20px rgba(56, 189, 248, 0.4)' }}>
-            <Cpu size={28} color="#090d16" />
+      <header className="glass-panel" style={{ padding: '16px 28px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ background: 'linear-gradient(135deg, #38bdf8, #818cf8)', width: '42px', height: '42px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 20px rgba(56, 189, 248, 0.4)' }}>
+            <Cpu size={24} color="#090d16" />
           </div>
           <div>
-            <h1 style={{ fontSize: '24px', fontWeight: '700', letterSpacing: '-0.5px', background: 'linear-gradient(to right, #f8fafc, #38bdf8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-              Dynamic Hybrid RAG 2.0
-            </h1>
-            <p style={{ fontSize: '13px', color: '#94a3b8' }}>
-              Hierarchical Multi-Stage RAG • MCP Web Tools • SAC Policy Learning
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h1 style={{ fontSize: '20px', fontWeight: '700', letterSpacing: '-0.5px', background: 'linear-gradient(to right, #f8fafc, #38bdf8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                Dynamic Hybrid RAG 2.0
+              </h1>
+              <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontWeight: '600', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+                DQN Quiz + Vision OCR
+              </span>
+            </div>
+            <p style={{ fontSize: '12px', color: '#94a3b8' }}>
+              Paste Images (`Ctrl+V`) • DQN Option Selector • Multi-Stage RAG
             </p>
           </div>
         </div>
 
-        {/* Server Status Badge */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 14px', borderRadius: '20px', background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        {/* Server Status Badge & Navigation Tabs */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', borderRadius: '20px', background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(255,255,255,0.08)' }}>
             <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: serverHealth?.status === 'online' ? '#34d399' : '#f43f5e', boxShadow: serverHealth?.status === 'online' ? '0 0 10px #34d399' : 'none' }} />
-            <span style={{ fontSize: '13px', color: '#cbd5e1', textTransform: 'capitalize' }}>
-              Server: {serverHealth?.status || 'Connecting...'}
+            <span style={{ fontSize: '12px', color: '#cbd5e1', textTransform: 'capitalize' }}>
+              {serverHealth?.status || 'Connecting...'}
             </span>
           </div>
 
-          {/* Navigation Tabs */}
           <div style={{ display: 'flex', background: 'rgba(15, 23, 42, 0.8)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <button 
+              onClick={() => setActiveTab('chat')}
+              style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: activeTab === 'chat' ? '#38bdf8' : 'transparent', color: activeTab === 'chat' ? '#090d16' : '#94a3b8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}>
+              <MessageSquare size={15} /> AI Chatbot
+            </button>
             <button 
               onClick={() => setActiveTab('pipeline')}
               style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: activeTab === 'pipeline' ? '#38bdf8' : 'transparent', color: activeTab === 'pipeline' ? '#090d16' : '#94a3b8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}>
-              <Zap size={15} /> RAG Pipeline
+              <Zap size={15} /> Pipeline Console
             </button>
             <button 
               onClick={() => setActiveTab('mcp')}
               style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: activeTab === 'mcp' ? '#38bdf8' : 'transparent', color: activeTab === 'mcp' ? '#090d16' : '#94a3b8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}>
-              <Code2 size={15} /> MCP Tools Studio
+              <Code2 size={15} /> MCP Tools
             </button>
           </div>
         </div>
       </header>
 
-      {/* ── MAIN TAB 1: RAG PIPELINE DASHBOARD ───────────────────────────────────────── */}
+      {/* ── TAB 1: AI CHATBOT (PASTE PHOTO & CHAT) ─────────────────────────────── */}
+      {activeTab === 'chat' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', flex: 1, gap: '16px' }}>
+          <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 140px)', position: 'relative', overflow: 'hidden' }}>
+            
+            {/* Chat Messages Scroll Area */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              {messages.map((msg, idx) => {
+                const isUser = msg.sender === 'user';
+                const hasTelemetry = !!msg.telemetry;
+                const isExpanded = !!expandedTelemetry[msg.id];
+
+                return (
+                  <div 
+                    key={msg.id || idx}
+                    className="fade-in"
+                    style={{ 
+                      display: 'flex', 
+                      flexDirection: isUser ? 'row-reverse' : 'row', 
+                      gap: '12px',
+                      maxWidth: isUser ? '80%' : '85%',
+                      alignSelf: isUser ? 'flex-end' : 'flex-start'
+                    }}>
+                    
+                    {/* Avatar */}
+                    <div style={{ 
+                      width: '36px', 
+                      height: '36px', 
+                      borderRadius: '10px', 
+                      background: isUser ? 'linear-gradient(135deg, #38bdf8, #818cf8)' : 'rgba(30, 41, 59, 0.9)', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center', 
+                      flexShrink: 0,
+                      border: isUser ? 'none' : '1px solid rgba(56, 189, 248, 0.3)',
+                      color: isUser ? '#090d16' : '#38bdf8',
+                      fontWeight: '700',
+                      fontSize: '13px'
+                    }}>
+                      {isUser ? 'YOU' : 'AI'}
+                    </div>
+
+                    {/* Message Card */}
+                    <div className={isUser ? 'chat-bubble-user' : 'chat-bubble-assistant'} style={{ padding: '16px 20px', position: 'relative' }}>
+                      
+                      {/* Attached Image Thumbnail (if user attached photo) */}
+                      {msg.image && (
+                        <div style={{ marginBottom: '12px', position: 'relative' }}>
+                          <img 
+                            src={msg.image} 
+                            alt="Pasted upload" 
+                            onClick={() => setModalImage(msg.image)}
+                            style={{ 
+                              maxWidth: '280px', 
+                              maxHeight: '200px', 
+                              borderRadius: '10px', 
+                              border: '1px solid rgba(56, 189, 248, 0.4)',
+                              cursor: 'pointer',
+                              display: 'block',
+                              transition: 'transform 0.2s',
+                              objectFit: 'cover'
+                            }} 
+                          />
+                          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <ImageIcon size={12} /> {msg.imageName || 'Pasted Image'} (Click to expand)
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Text Content */}
+                      <div style={{ fontSize: '14.5px', lineHeight: '1.6', color: '#f8fafc', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                        {msg.text}
+                      </div>
+
+                      {/* Telemetry / Quiz Details Footer (For Assistant) */}
+                      {hasTelemetry && (
+                        <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', fontWeight: '600' }}>
+                                Route: {msg.telemetry.routing}
+                              </span>
+                              {msg.telemetry.domain && (
+                                <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(129, 140, 248, 0.12)', color: '#818cf8', fontWeight: '600' }}>
+                                  Domain: {msg.telemetry.domain}
+                                </span>
+                              )}
+                              {msg.telemetry.verification?.passed && (
+                                <span style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(52, 211, 153, 0.12)', color: '#34d399', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <ShieldCheck size={12} /> 100% Verified
+                                </span>
+                              )}
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <button
+                                onClick={() => copyToClipboard(msg.text, idx)}
+                                style={{ background: 'transparent', border: 'none', color: copiedIndex === idx ? '#34d399' : '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px' }}>
+                                {copiedIndex === idx ? <Check size={13} /> : <Copy size={13} />} {copiedIndex === idx ? 'Copied' : 'Copy'}
+                              </button>
+
+                              <button
+                                onClick={() => setExpandedTelemetry(prev => ({ ...prev, [msg.id]: !prev[msg.id] }))}
+                                style={{ background: 'transparent', border: 'none', color: '#38bdf8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '2px', fontSize: '12px', fontWeight: '600' }}>
+                                Telemetry {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Expanded Telemetry Box */}
+                          {isExpanded && (
+                            <div style={{ marginTop: '12px', padding: '12px', borderRadius: '8px', background: 'rgba(10, 15, 29, 0.9)', border: '1px solid rgba(56, 189, 248, 0.2)', fontSize: '12px', color: '#cbd5e1' }}>
+                              {msg.telemetry.funnel_meta?.probability_distribution && (
+                                <div style={{ marginBottom: '10px' }}>
+                                  <div style={{ fontWeight: '600', color: '#38bdf8', marginBottom: '4px' }}>DQN Probability Distribution:</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
+                                    {Object.entries(msg.telemetry.funnel_meta.probability_distribution).map(([letter, prob]) => (
+                                      <div key={letter} style={{ padding: '4px 8px', borderRadius: '4px', background: letter === msg.telemetry.funnel_meta?.selected_letter ? 'rgba(52, 211, 153, 0.2)' : 'rgba(255,255,255,0.04)', border: letter === msg.telemetry.funnel_meta?.selected_letter ? '1px solid #34d399' : '1px solid transparent', textAlign: 'center' }}>
+                                        <strong>{letter}:</strong> {(prob * 100).toFixed(1)}%
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {msg.telemetry.funnel_meta?.evidence && (
+                                <div style={{ marginBottom: '6px' }}>
+                                  <span style={{ color: '#818cf8', fontWeight: '600' }}>Retrieved Evidence: </span>
+                                  <span style={{ color: '#94a3b8' }}>"{msg.telemetry.funnel_meta.evidence}"</span>
+                                </div>
+                              )}
+
+                              {msg.telemetry.funnel_meta?.ocr_text && (
+                                <div>
+                                  <span style={{ color: '#c084fc', fontWeight: '600' }}>OCR Extracted Text: </span>
+                                  <span style={{ color: '#94a3b8' }}>"{msg.telemetry.funnel_meta.ocr_text}"</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Timestamp */}
+                      <div style={{ fontSize: '10px', color: '#64748b', textAlign: 'right', marginTop: '6px' }}>
+                        {msg.timestamp}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Loading Chat Bubble */}
+              {loading && (
+                <div className="fade-in" style={{ display: 'flex', gap: '12px', maxWidth: '80%' }}>
+                  <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'rgba(30, 41, 59, 0.9)', border: '1px solid rgba(56, 189, 248, 0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#38bdf8' }}>
+                    <RefreshCw className="animate-spin" size={16} />
+                  </div>
+                  <div className="chat-bubble-assistant" style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span style={{ fontSize: '14px', color: '#cbd5e1' }}>Analyzing query & evidence via Dueling DQN & RAG...</span>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Pasted Image Preview Pill (Above Input) */}
+            {pastedImage && (
+              <div style={{ padding: '8px 20px', background: 'rgba(56, 189, 248, 0.1)', borderTop: '1px solid rgba(56, 189, 248, 0.25)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <img 
+                  src={pastedImage.preview} 
+                  alt="Attached preview" 
+                  style={{ width: '36px', height: '36px', borderRadius: '6px', objectFit: 'cover', border: '1px solid #38bdf8' }} 
+                />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '13px', color: '#f8fafc', fontWeight: '600' }}>
+                    📷 {pastedImage.name}
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#38bdf8' }}>
+                    {pastedImage.size} • Ready to send with OCR & Vision Analysis
+                  </div>
+                </div>
+                <button
+                  onClick={() => setPastedImage(null)}
+                  style={{ background: 'rgba(244, 63, 94, 0.15)', border: '1px solid rgba(244, 63, 94, 0.3)', color: '#f43f5e', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <X size={13} /> Remove
+                </button>
+              </div>
+            )}
+
+            {/* Chat Input & Drag-Drop Bar */}
+            <div 
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={isDragging ? 'dropzone-active' : ''}
+              style={{ 
+                padding: '16px 20px', 
+                background: 'rgba(10, 15, 29, 0.95)', 
+                borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+                transition: 'all 0.2s'
+              }}>
+              
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                
+                {/* Paste / Attach Button */}
+                <label 
+                  title="Attach or Paste Image (Ctrl+V)"
+                  style={{ 
+                    padding: '12px 14px', 
+                    borderRadius: '10px', 
+                    background: pastedImage ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.05)', 
+                    border: '1px solid rgba(56, 189, 248, 0.3)', 
+                    color: '#38bdf8', 
+                    cursor: 'pointer', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '6px',
+                    fontSize: '13px',
+                    fontWeight: '600'
+                  }}>
+                  <Paperclip size={16} />
+                  <span style={{ display: 'inline' }}>Attach/Paste</span>
+                  <input type="file" accept="image/*,.pdf" onChange={handleFileInputChange} style={{ display: 'none' }} />
+                </label>
+
+                {/* Main Query Input (with onPaste listener) */}
+                <input
+                  ref={chatInputRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onPaste={handlePaste}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendChatMessage();
+                    }
+                  }}
+                  placeholder="Type a message or press Ctrl+V to paste a photo/screenshot..."
+                  style={{ 
+                    flex: 1, 
+                    padding: '14px 18px', 
+                    borderRadius: '10px', 
+                    background: 'rgba(15, 23, 42, 0.8)', 
+                    border: '1px solid var(--border-glow)', 
+                    color: '#f8fafc', 
+                    fontSize: '14.5px', 
+                    outline: 'none' 
+                  }}
+                />
+
+                {/* Send Button */}
+                <button
+                  onClick={() => handleSendChatMessage()}
+                  disabled={loading || (!query.trim() && !pastedImage)}
+                  style={{ 
+                    padding: '0 24px', 
+                    height: '48px', 
+                    borderRadius: '10px', 
+                    border: 'none', 
+                    background: 'linear-gradient(135deg, #38bdf8, #818cf8)', 
+                    color: '#090d16', 
+                    fontWeight: '700', 
+                    fontSize: '14px', 
+                    cursor: 'pointer', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '8px', 
+                    opacity: (loading || (!query.trim() && !pastedImage)) ? 0.5 : 1 
+                  }}>
+                  {loading ? <RefreshCw className="animate-spin" size={16} /> : <Send size={16} />} Send
+                </button>
+
+                {/* Clear Chat Button */}
+                <button
+                  title="Clear conversation"
+                  onClick={() => setMessages([])}
+                  style={{ 
+                    padding: '12px', 
+                    borderRadius: '10px', 
+                    background: 'rgba(255,255,255,0.04)', 
+                    border: '1px solid rgba(255,255,255,0.08)', 
+                    color: '#94a3b8', 
+                    cursor: 'pointer' 
+                  }}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+
+              {/* Sample Prompt Chips */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center', marginTop: '12px' }}>
+                <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '600' }}>Quick Samples:</span>
+                {SAMPLE_QUERIES.map((q, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => { setQuery(q); handleSendChatMessage(q); }}
+                    style={{ padding: '4px 10px', borderRadius: '16px', background: 'rgba(56, 189, 248, 0.06)', border: '1px solid rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontSize: '11px', cursor: 'pointer' }}>
+                    {q.length > 35 ? q.slice(0, 35) + '...' : q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── TAB 2: PIPELINE CONSOLE ───────────────────────────────────────────── */}
       {activeTab === 'pipeline' && (
         <main>
-          {/* Search Console Card */}
-          <section className="glass-panel" style={{ padding: '32px', marginBottom: '32px' }}>
-            <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Search size={20} color="#38bdf8" /> Query Execution Console
+          <section className="glass-panel" style={{ padding: '28px', marginBottom: '24px' }}>
+            <h2 style={{ fontSize: '17px', fontWeight: '600', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Search size={18} color="#38bdf8" /> Multi-Stage RAG Execution Console
             </h2>
 
-            <form onSubmit={(e) => { e.preventDefault(); handleSearch(); }} style={{ display: 'flex', gap: '12px', marginBottom: '20px', alignItems: 'center' }}>
+            <form onSubmit={(e) => { e.preventDefault(); handlePipelineSearch(); }} style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Ask any text query or upload an Image (Calculus/Physics/Chart) or PDF Document..."
-                style={{ flex: 1, padding: '16px 20px', borderRadius: '12px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', fontSize: '15px', outline: 'none' }}
+                onPaste={handlePaste}
+                placeholder="Ask any text query or paste an image (`Ctrl+V`)..."
+                style={{ flex: 1, padding: '14px 18px', borderRadius: '10px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', fontSize: '14.5px', outline: 'none' }}
               />
 
-              <label style={{ padding: '16px 20px', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.1)', border: '1px dashed #38bdf8', color: '#38bdf8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
-                📷 {selectedFile ? selectedFile.name.slice(0, 18) + '...' : 'Upload Image / PDF'}
-                <input type="file" accept="image/*,.pdf" onChange={handleFileUpload} style={{ display: 'none' }} />
+              <label style={{ padding: '14px 18px', borderRadius: '10px', background: 'rgba(56, 189, 248, 0.1)', border: '1px dashed #38bdf8', color: '#38bdf8', fontWeight: '600', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
+                📷 {pastedImage ? pastedImage.name.slice(0, 15) + '...' : 'Upload/Paste'}
+                <input type="file" accept="image/*,.pdf" onChange={handleFileInputChange} style={{ display: 'none' }} />
               </label>
 
               <button
                 type="submit"
                 disabled={loading}
-                style={{ padding: '0 32px', height: '54px', borderRadius: '12px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', fontSize: '15px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.7 : 1 }}>
-                {loading ? <RefreshCw className="animate-spin" size={18} /> : <Play size={18} />} Run Query
+                style={{ padding: '0 28px', height: '48px', borderRadius: '10px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', opacity: loading ? 0.7 : 1 }}>
+                {loading ? <RefreshCw className="animate-spin" size={16} /> : <Play size={16} />} Run Pipeline
               </button>
             </form>
 
-            {filePreview && (
-              <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px', background: 'rgba(56, 189, 248, 0.08)', padding: '10px 16px', borderRadius: '10px', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-                <span style={{ fontSize: '12px', color: '#38bdf8', fontWeight: '600' }}>Uploaded Payload Preview:</span>
-                {selectedFile?.type?.startsWith('image/') ? (
-                  <img src={filePreview} alt="upload preview" style={{ height: '40px', borderRadius: '6px', border: '1px solid #38bdf8' }} />
-                ) : (
-                  <span style={{ fontSize: '13px', color: '#f8fafc' }}>📄 {selectedFile?.name}</span>
-                )}
-                <button onClick={() => { setSelectedFile(null); setFilePreview(null); }} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#f43f5e', cursor: 'pointer', fontSize: '12px', fontWeight: '700' }}>Remove ✕</button>
+            {pastedImage && (
+              <div style={{ marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(56, 189, 248, 0.08)', padding: '8px 14px', borderRadius: '8px', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                <img src={pastedImage.preview} alt="upload preview" style={{ height: '36px', borderRadius: '4px', border: '1px solid #38bdf8' }} />
+                <span style={{ fontSize: '12px', color: '#f8fafc' }}>{pastedImage.name} ({pastedImage.size})</span>
+                <button onClick={() => setPastedImage(null)} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#f43f5e', cursor: 'pointer', fontSize: '12px', fontWeight: '700' }}>Remove ✕</button>
               </div>
             )}
-
-            {/* Quick Sample Chips */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
-              <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>Sample Prompts:</span>
-              {SAMPLE_QUERIES.map((q, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => { setQuery(q); handleSearch(q); }}
-                  style={{ padding: '6px 12px', borderRadius: '20px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', color: '#38bdf8', fontSize: '12px', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  {q.length > 40 ? q.slice(0, 40) + '...' : q}
-                </button>
-              ))}
-            </div>
           </section>
 
-          {/* Loading Indicator */}
-          {loading && (
-            <div className="glass-panel" style={{ padding: '48px', textAlign: 'center', marginBottom: '32px' }}>
-              <RefreshCw className="animate-spin" size={36} color="#38bdf8" style={{ margin: '0 auto 16px' }} />
-              <h3 style={{ fontSize: '18px', fontWeight: '600' }}>Executing Multi-Stage RAG Pipeline</h3>
-              <p style={{ fontSize: '14px', color: '#94a3b8', marginTop: '8px' }}>
-                Routing Intent ➔ Filtering $10 \rightarrow 5 \rightarrow 3$ Chunks ➔ Verifying Answer...
-              </p>
-            </div>
-          )}
-
-          {/* Error Message */}
-          {error && (
-            <div className="glass-panel" style={{ padding: '24px', borderColor: 'rgba(244, 63, 94, 0.4)', background: 'rgba(244, 63, 94, 0.05)', marginBottom: '32px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#f43f5e' }}>
-                <AlertCircle size={24} />
-                <div>
-                  <h4 style={{ fontWeight: '600' }}>Pipeline Execution Error</h4>
-                  <p style={{ fontSize: '14px', color: '#fca5a5' }}>{error}</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Pipeline Results Dashboard */}
+          {/* Results Display */}
           {result && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '28px' }}>
-              
-              {/* Left Column: Final Answer & Agentic Code Studio */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '24px' }}>
               <div>
-                <section className="glass-panel" style={{ padding: '32px', marginBottom: '28px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                    <h3 style={{ fontSize: '18px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <Sparkles size={20} color="#34d399" /> Pipeline Synthesis Answer
+                <section className="glass-panel" style={{ padding: '24px', marginBottom: '24px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Sparkles size={18} /> Verified Generated Answer
                     </h3>
                     <button
-                      onClick={() => copyToClipboard(result.final_answer)}
-                      style={{ padding: '6px 14px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(15, 23, 42, 0.6)', color: '#cbd5e1', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {copied ? <Check size={14} color="#34d399" /> : <Copy size={14} />} {copied ? 'Copied' : 'Copy Answer'}
+                      onClick={() => copyToClipboard(result.final_answer, 'pipeline')}
+                      style={{ padding: '6px 12px', borderRadius: '6px', background: 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)', color: '#38bdf8', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      {copiedIndex === 'pipeline' ? <Check size={12} /> : <Copy size={12} />} {copiedIndex === 'pipeline' ? 'Copied' : 'Copy'}
                     </button>
                   </div>
 
-                  <div style={{ background: '#090d16', padding: '24px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'pre-wrap', lineHeight: '1.6', fontSize: '14px', color: '#e2e8f0' }}>
+                  <div style={{ fontSize: '14.5px', lineHeight: '1.7', whiteSpace: 'pre-wrap', color: '#f8fafc', background: 'rgba(10, 15, 29, 0.6)', padding: '18px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.06)' }}>
                     {result.final_answer}
                   </div>
                 </section>
               </div>
 
-              {/* Right Column: Pipeline Telemetry & Verifier Radar */}
+              {/* Sidebar Telemetry */}
               <div>
-                {/* Intent & Router Telemetry */}
-                <section className="glass-panel" style={{ padding: '24px', marginBottom: '24px' }}>
-                  <h4 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: '#38bdf8' }}>
-                    <Layers size={18} /> Domain Router Telemetry
+                <section className="glass-panel" style={{ padding: '20px' }}>
+                  <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#38bdf8', marginBottom: '12px' }}>
+                    Pipeline Telemetry
                   </h4>
-                  
-                  {/* Domain colour helper */}
-                  {(() => {
-                    const domainColors = {
-                      SPORTS:           '#f59e0b',
-                      MILITARY_HISTORY: '#ef4444',
-                      GENERAL:          '#38bdf8',
-                    };
-                    const domainColor = domainColors[result.domain] || '#38bdf8';
-                    const rows = [
-                      { label: 'Question Pattern', value: result.operation_pattern || 'GENERAL', color: '#a78bfa', bold: true },
-                      { label: 'Detected Domain',  value: result.domain || 'GENERAL',            color: domainColor, bold: true },
-                      result.answer_style?.depth && { label: 'Response Depth', value: result.answer_style.depth, color: '#38bdf8', bold: true },
-                      result.answer_style?.style && { label: 'Answer Style',   value: result.answer_style.style, color: '#f472b6' },
-                      result.answer_style?.output_format && { label: 'Output Format',  value: result.answer_style.output_format, color: '#34d399' },
-                      result.answer_style?.technical_level && { label: 'Tech Level',  value: result.answer_style.technical_level, color: '#fbbf24' },
-                      result.sport      && { label: 'Sport',      value: result.sport,      color: '#38bdf8' },
-                      result.entities   && { label: 'Entities',   value: result.entities,   color: '#34d399' },
-                      result.statistic  && { label: 'Statistic',  value: result.statistic,  color: '#f472b6' },
-                      result.operation  && { label: 'Operation',  value: result.operation,  color: '#fbbf24' },
-                      result.time_scope && { label: 'Time Scope', value: result.time_scope, color: '#a78bfa' },
-                      { label: 'Detected Intent', value: result.intent?.type || '—', color: '#38bdf8', bold: true },
-                      { label: 'Route Target',    value: result.routing || '—',      color: '#c084fc' },
-                      { label: 'Data Source',     value: result.data_source || 'Web RAG', color: '#38bdf8' },
-                    ].filter(Boolean);
-                    return (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                        {rows.map((r, i) => (
-                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', alignItems: 'center' }}>
-                            <span style={{ color: '#94a3b8' }}>{r.label}:</span>
-                            <span style={{ fontWeight: r.bold ? '700' : '600', color: r.color, maxWidth: '55%', textAlign: 'right', wordBreak: 'break-word' }}>{r.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })()}
-                </section>
-
-                {/* Multi-Stage RAG Funnel Progress */}
-                <section className="glass-panel" style={{ padding: '24px', marginBottom: '24px' }}>
-                  <h4 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: '#818cf8' }}>
-                    <Database size={18} /> Multi-Stage RAG Funnel
-                  </h4>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '13px' }}>
-                    <div style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-                      <strong>1. Retrieval Pool:</strong> 10+ Chunks Extracted
-                    </div>
-                    <div style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(129, 140, 248, 0.08)', border: '1px solid rgba(129, 140, 248, 0.2)' }}>
-                      <strong>2. Embedding Filter:</strong> Top-5 Chunks Filtered
-                    </div>
-                    <div style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(192, 132, 252, 0.08)', border: '1px solid rgba(192, 132, 252, 0.2)' }}>
-                      <strong>3. Cross-Encoder Rerank:</strong> Top-3 Chunks Distilled
-                    </div>
-                  </div>
-                </section>
-
-                {/* 4D Verification & SAC Reward */}
-                <section className="glass-panel" style={{ padding: '24px' }}>
-                  <h4 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: '#34d399' }}>
-                    <ShieldCheck size={18} /> 4D Verifier & SAC Policy
-                  </h4>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '13px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: '#94a3b8' }}>Verifier Score:</span>
-                      <span style={{ fontWeight: '700', color: '#34d399' }}>{result.verification.score.toFixed(2)}</span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: '#94a3b8' }}>SAC Policy Reward R(s,a):</span>
-                      <span style={{ fontWeight: '700', color: '#fbbf24' }}>+{result.sac_reward.toFixed(2)}</span>
-                    </div>
+                  <div style={{ fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div><strong>Route:</strong> <span style={{ color: '#38bdf8' }}>{result.routing}</span></div>
+                    <div><strong>Domain:</strong> <span style={{ color: '#818cf8' }}>{result.domain || 'N/A'}</span></div>
+                    <div><strong>Intent:</strong> <span style={{ color: '#cbd5e1' }}>{result.intent?.type} ({((result.intent?.confidence || 1) * 100).toFixed(0)}%)</span></div>
+                    <div><strong>Verification:</strong> <span style={{ color: '#34d399' }}>{result.verification?.passed ? 'PASSED (100%)' : 'CHECKING'}</span></div>
                   </div>
                 </section>
               </div>
-
             </div>
           )}
         </main>
       )}
 
-      {/* ── TAB 2: MCP TOOLS STUDIO ─────────────────────────────────────────── */}
+      {/* ── TAB 3: MCP TOOLS STUDIO ───────────────────────────────────────────── */}
       {activeTab === 'mcp' && (
-        <main className="glass-panel" style={{ padding: '32px' }}>
-          <h2 style={{ fontSize: '20px', fontWeight: '700', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <Code2 size={24} color="#38bdf8" /> Model Context Protocol (MCP) Tools Playground
-          </h2>
-          <p style={{ fontSize: '14px', color: '#94a3b8', marginBottom: '24px' }}>
-            Execute standard JSON-RPC 2.0 MCP tool calls targeting GeeksforGeeks, LeetCode, and Codeforces.
-          </p>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '24px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '13px', color: '#cbd5e1', marginBottom: '8px', fontWeight: '600' }}>
-                Select MCP Tool:
-              </label>
+        <main>
+          <section className="glass-panel" style={{ padding: '28px' }}>
+            <h2 style={{ fontSize: '17px', fontWeight: '600', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Code2 size={18} color="#38bdf8" /> Model Context Protocol (MCP) JSON-RPC Tester
+            </h2>
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
               <select
                 value={mcpTool}
                 onChange={(e) => setMcpTool(e.target.value)}
-                style={{ width: '100%', padding: '12px 16px', borderRadius: '10px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', outline: 'none' }}>
-                <option value="search_leetcode_solution">search_leetcode_solution (LeetCode)</option>
-                <option value="search_geeksforgeeks_solution">search_geeksforgeeks_solution (GeeksforGeeks)</option>
-                <option value="search_codeforces_solution">search_codeforces_solution (Codeforces)</option>
-                <option value="mcp_web_rag_coding_search">mcp_web_rag_coding_search (Unified Platform Search)</option>
+                style={{ padding: '12px', borderRadius: '8px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', outline: 'none' }}>
+                <option value="search_leetcode_solution">LeetCode Solution Tool</option>
+                <option value="travel_route_finder">Travel Route Finder</option>
+                <option value="finance_market_stats">Finance Market Stats</option>
+                <option value="live_weather_lookup">Live Weather Lookup</option>
               </select>
-            </div>
 
-            <div>
-              <label style={{ display: 'block', fontSize: '13px', color: '#cbd5e1', marginBottom: '8px', fontWeight: '600' }}>
-                Query / Problem Parameter:
-              </label>
               <input
                 type="text"
                 value={mcpArg}
                 onChange={(e) => setMcpArg(e.target.value)}
-                placeholder="e.g. Longest Substring, Two Sum, Quicksort"
-                style={{ width: '100%', padding: '12px 16px', borderRadius: '10px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', outline: 'none' }}
+                placeholder="Argument value..."
+                style={{ flex: 1, padding: '12px 16px', borderRadius: '8px', background: 'rgba(15, 23, 42, 0.9)', border: '1px solid var(--border-glow)', color: '#f8fafc', outline: 'none' }}
               />
+
+              <button
+                onClick={handleMcpCall}
+                disabled={mcpLoading}
+                style={{ padding: '0 24px', borderRadius: '8px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', cursor: 'pointer' }}>
+                {mcpLoading ? 'Executing...' : 'Call MCP Tool'}
+              </button>
             </div>
-          </div>
 
-          <button
-            onClick={handleMcpCall}
-            disabled={mcpLoading}
-            style={{ padding: '12px 28px', borderRadius: '10px', border: 'none', background: 'linear-gradient(135deg, #38bdf8, #818cf8)', color: '#090d16', fontWeight: '700', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '28px' }}>
-            {mcpLoading ? <RefreshCw className="animate-spin" size={16} /> : <Play size={16} />} Execute MCP JSON-RPC Request
-          </button>
-
-          {mcpResult && (
-            <div>
-              <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px' }}>JSON-RPC Response Payload:</h3>
-              <pre style={{ background: '#090d16', padding: '20px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)', fontSize: '13px', color: '#34d399', overflowX: 'auto' }}>
+            {mcpResult && (
+              <pre style={{ padding: '16px', borderRadius: '8px', background: 'rgba(10, 15, 29, 0.8)', border: '1px solid rgba(56, 189, 248, 0.2)', color: '#38bdf8', overflowX: 'auto' }}>
                 {JSON.stringify(mcpResult, null, 2)}
               </pre>
-            </div>
-          )}
+            )}
+          </section>
         </main>
       )}
 
+      {/* ── Image Modal (Enlarge Pasted Image) ────────────────────────────────── */}
+      {modalImage && (
+        <div 
+          onClick={() => setModalImage(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: '20px' }}>
+          <div style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
+            <img src={modalImage} alt="Enlarged view" style={{ maxWidth: '100%', maxHeight: '85vh', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.5)' }} />
+            <button
+              onClick={() => setModalImage(null)}
+              style={{ position: 'absolute', top: '-14px', right: '-14px', width: '32px', height: '32px', borderRadius: '50%', background: '#f43f5e', color: '#fff', border: 'none', fontWeight: '700', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

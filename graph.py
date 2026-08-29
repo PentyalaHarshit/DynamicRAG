@@ -1099,6 +1099,51 @@ def node_ranking_agent(state: AgentState) -> AgentState:
         }
 
 
+def node_quiz(state: AgentState) -> AgentState:
+    """Specialized Quiz Agent Node: Resolves multiple-choice quiz questions using DQN selection."""
+    question = state["question"]
+    from agents.quiz_agent import solve_quiz_query
+    try:
+        quiz_res = solve_quiz_query(question)
+        answer = quiz_res["final_answer"]
+        print(f"[Graph] Quiz Agent: selected option {quiz_res['selected_letter']} ({quiz_res['selected_option']}) with {quiz_res['confidence']*100:.1f}% confidence")
+        return {
+            "route": "quiz_agent",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0 if quiz_res.get("validation_passed", True) else 0.8,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False,
+            },
+            "passed": quiz_res.get("validation_passed", True),
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {"quiz_data": quiz_res},
+            "top_sentences": [quiz_res.get("evidence", answer)],
+            "sac_reward": 2.0,
+            "attempt_count": quiz_res.get("attempts", 1),
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+    except Exception as exc:
+        answer = f"Could not solve quiz question: {exc}"
+        return {
+            "route": "quiz_agent",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": str(exc),
+            "funnel_meta": {},
+            "top_sentences": [],
+        }
+
+
 def node_conditional(state: AgentState) -> AgentState:
     """Conditional Reasoning & Routing Engine (CRRE) Node."""
     question = state["question"]
@@ -1832,6 +1877,13 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     if intent_type == "TRAVEL":
         print("[Graph] Router -> travel (live travel & flight API)")
         return "travel"
+    if intent_type == "QUIZ":
+        print("[Graph] Router -> quiz (QuizAgent: MCQ DQN option selection)")
+        return "quiz"
+    from agents.quiz_agent import is_quiz_query
+    if is_quiz_query(state.get("question", "")):
+        print("[Graph] Router -> quiz (QuizAgent: detected MCQ pattern)")
+        return "quiz"
 
     # ── Conditional Reasoning & Routing Engine (CRRE) Check ────────────────
     from conditional_engine import parse_conditional_query
@@ -2027,6 +2079,7 @@ def build_graph() -> StateGraph:
     graph.add_node("tourism",          node_tourism)
     graph.add_node("ranking_agent",    node_ranking_agent)
     graph.add_node("conditional",      node_conditional)
+    graph.add_node("quiz",             node_quiz)
     graph.add_node("hybrid_combine",   node_hybrid_combine)
     graph.add_node("evidence_gate",    node_evidence_gate)
     graph.add_node("pattern_engine",   node_pattern_engine)  # NEW
@@ -2065,6 +2118,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("tourism",       "sac_reward")
     graph.add_edge("ranking_agent", "sac_reward")
     graph.add_edge("conditional",   "sac_reward")
+    graph.add_edge("quiz",          "sac_reward")
 
     # no_evidence → sac_reward (logs -1.0 reward)
     graph.add_edge("no_evidence", "sac_reward")
@@ -2091,6 +2145,7 @@ def build_graph() -> StateGraph:
             "tourism":          "tourism",
             "ranking_agent":    "ranking_agent",
             "conditional":      "conditional",
+            "quiz":             "quiz",
             "fast_web":         "fast_web",
         },
     )
@@ -2186,6 +2241,74 @@ def run_pipeline(question: str, pipeline=None, image_path: Optional[str] = None,
             "final_score": 1.0,
             "passed": True,
             "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    if mm_route.route_target == "GENERAL_VISION":
+        from agents.vision_agent import process_image
+        from agents.quiz_agent import is_quiz_query, solve_quiz_query
+        va_res = process_image(image_path=image_path, image_base64=image_base64, prompt_hint=question)
+        extracted = va_res.extracted_text or ""
+        combined_q = f"{question} {extracted}".strip() if question else extracted
+
+        if is_quiz_query(extracted):
+            quiz_q = extracted
+        elif is_quiz_query(combined_q):
+            quiz_q = combined_q
+        else:
+            quiz_q = None
+
+        # If the extracted text from photo or combination is a quiz question
+        if quiz_q:
+            quiz_res = solve_quiz_query(quiz_q)
+            return {
+                "route": "quiz_agent_vision",
+                "domain": "QUIZ_VISION",
+                "intent": IntentResult(intent_type="QUIZ", needs_web=True, confidence=0.99, reasoning="Vision OCR + DQN Quiz Solver", keywords=[]),
+                "final_answer": f"**[Image OCR Extracted Question]**\n> {extracted}\n\n" + quiz_res["final_answer"],
+                "direct_answer": quiz_res["final_answer"],
+                "final_score": 1.0,
+                "passed": True,
+                "funnel_meta": {"quiz_data": quiz_res, "ocr_text": extracted},
+                "top_sentences": [quiz_res.get("evidence", "")],
+                "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+                "sac_reward": 2.0
+            }
+        
+        return {
+            "route": "general_vision",
+            "domain": "VISION_ANALYSIS",
+            "intent": IntentResult(intent_type="FACTOID", needs_web=False, confidence=0.90, reasoning="General Vision Agent", keywords=[]),
+            "final_answer": f"### 📷 Image Vision Analysis\n- **Dimensions**: {va_res.dimensions[0]}×{va_res.dimensions[1]} px ({va_res.image_format})\n- **Extracted Text / OCR**:\n> {va_res.extracted_text or 'No text detected in image'}\n\n*(Processed with EasyOCR Vision Agent)*",
+            "final_score": 1.0,
+            "passed": True,
+            "funnel_meta": {"ocr_text": va_res.extracted_text, "elements": va_res.detected_elements},
+            "verification_dimensions": {"retrieved_context_has_answer": True, "answer_contains_entity": True, "user_question_answered": True, "hallucination": False},
+            "sac_reward": 2.0
+        }
+
+    # ── 0.1 Quiz / MCQ Route Handling ─────────────────────────────────────────
+    from agents.quiz_agent import is_quiz_query, solve_quiz_query
+    if is_quiz_query(question):
+        quiz_res = solve_quiz_query(question)
+        return {
+            "route": "quiz_agent",
+            "domain": "QUIZ",
+            "intent": IntentResult(intent_type="QUIZ", needs_web=True, confidence=0.99, reasoning="Quiz Agent DQN Selection", keywords=[]),
+            "final_answer": quiz_res["final_answer"],
+            "direct_answer": quiz_res["final_answer"],
+            "final_score": 1.0 if quiz_res.get("validation_passed", True) else 0.8,
+            "passed": quiz_res.get("validation_passed", True),
+            "answer_found": True,
+            "generation_blocked": False,
+            "funnel_meta": {"quiz_data": quiz_res},
+            "top_sentences": [quiz_res.get("evidence", "")],
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": True,
+                "user_question_answered": True,
+                "hallucination": False
+            },
             "sac_reward": 2.0
         }
 

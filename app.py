@@ -118,6 +118,7 @@ def execute_query(req: QueryRequest):
                 "passed": res.get("passed", True)
             },
             "sac_reward": res.get("sac_reward", 2.0),
+            "funnel_meta": res.get("funnel_meta", {}),
             "final_answer": res.get("final_answer", "")
         }
     except Exception as e:
@@ -139,7 +140,7 @@ def execute_multimodal_query(req: MultimodalQueryRequest):
 
     try:
         res = run_pipeline(
-            question=req.query or "Analyze payload",
+            question=req.query or "",
             image_path=req.image_path,
             image_base64=req.image_base64,
             pdf_path=req.pdf_path
@@ -149,6 +150,7 @@ def execute_multimodal_query(req: MultimodalQueryRequest):
             "status": "success",
             "query": req.query,
             "routing": res.get("route", "multimodal"),
+            "domain": res.get("domain", "MULTIMODAL"),
             "intent": {
                 "type": intent_obj.intent_type if intent_obj else "MULTIMODAL",
                 "confidence": intent_obj.confidence if intent_obj else 0.95
@@ -157,6 +159,7 @@ def execute_multimodal_query(req: MultimodalQueryRequest):
                 "score": res.get("final_score", 1.0),
                 "passed": res.get("passed", True)
             },
+            "funnel_meta": res.get("funnel_meta", {}),
             "final_answer": res.get("final_answer", "")
         }
     except Exception as e:

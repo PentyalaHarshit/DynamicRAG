@@ -47,10 +47,10 @@ def route_multimodal_input(input_data: MultimodalInput) -> RouteDecision:
 
     # 2. Image Stream (Path or Base64)
     if input_data.image_path or input_data.image_base64:
-        # Check domain keywords in prompt or image filename
-        path_str = (input_data.image_path or "").lower()
+        # Check domain keywords in prompt or image filename (use basename, not full directory path!)
+        filename_str = os.path.basename(input_data.image_path or "").lower()
 
-        if any(w in prompt_lower or w in path_str for w in ("integral", "derivative", "equation", "calculus", "math", "solve", "latex", "d/dx")):
+        if any(w in prompt_lower or w in filename_str for w in ("integral", "derivative", "calculus", "latex", "d/dx")):
             return RouteDecision(
                 input_modal="IMAGE",
                 route_target="MATH_VISION",
@@ -58,7 +58,7 @@ def route_multimodal_input(input_data: MultimodalInput) -> RouteDecision:
                 metadata={"domain": "mathematics"}
             )
 
-        if any(w in prompt_lower or w in path_str for w in ("physics", "force", "diagram", "mass", "velocity", "acceleration", "block", "angle", "relativity", "gravity")):
+        if any(w in prompt_lower or w in filename_str for w in ("physics", "free body", "kinematics", "projectile", "quantum")):
             return RouteDecision(
                 input_modal="IMAGE",
                 route_target="PHYSICS_VISION",
@@ -66,7 +66,7 @@ def route_multimodal_input(input_data: MultimodalInput) -> RouteDecision:
                 metadata={"domain": "physics"}
             )
 
-        if any(w in prompt_lower or w in path_str for w in ("chart", "graph", "plot", "table", "increase", "bar", "pie", "histogram")):
+        if any(w in prompt_lower or w in filename_str for w in ("chart", "plot", "histogram", "barchart", "piechart")):
             return RouteDecision(
                 input_modal="IMAGE",
                 route_target="CHART_DATA",

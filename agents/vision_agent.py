@@ -45,7 +45,7 @@ def process_image(image_path: Optional[str] = None, image_base64: Optional[str] 
             fmt = img.format or "PNG"
             size = img.size
 
-        # Try OCR if pytesseract is installed
+        # Try OCR with pytesseract or easyocr
         ocr_text = ""
         try:
             import pytesseract
@@ -53,6 +53,85 @@ def process_image(image_path: Optional[str] = None, image_base64: Optional[str] 
                 ocr_text = pytesseract.image_to_string(img).strip()
         except Exception:
             ocr_text = ""
+
+        if not ocr_text and img:
+            try:
+                import easyocr
+                import numpy as np
+                reader = easyocr.Reader(['en'], gpu=False)
+                img_np = np.array(img.convert('RGB'))
+                ocr_results = reader.readtext(img_np)
+                if ocr_results:
+                    # Spatial line grouping
+                    boxes = []
+                    for bbox, text, prob in ocr_results:
+                        x_mid = (bbox[0][0] + bbox[1][0]) / 2.0
+                        y_mid = (bbox[0][1] + bbox[2][1]) / 2.0
+                        boxes.append({'x': x_mid, 'y': y_mid, 'text': text, 'prob': prob, 'top': bbox[0][1]})
+                    
+                    # Sort boxes by vertical coordinate
+                    boxes.sort(key=lambda b: b['top'])
+                    lines = []
+                    curr_line = []
+                    curr_y = None
+                    for b in boxes:
+                        if curr_y is None or abs(b['top'] - curr_y) < 18:
+                            curr_line.append(b)
+                            curr_y = b['top'] if curr_y is None else (curr_y + b['top'])/2.0
+                        else:
+                            curr_line.sort(key=lambda item: item['x'])
+                            lines.append({'y': curr_y, 'text': ' '.join(item['text'] for item in curr_line)})
+                            curr_line = [b]
+                            curr_y = b['top']
+                    if curr_line:
+                        curr_line.sort(key=lambda item: item['x'])
+                        lines.append({'y': curr_y, 'text': ' '.join(item['text'] for item in curr_line)})
+
+                    # Check if this forms a quiz question with multiple choices
+                    q_idx = -1
+                    for i, l in enumerate(lines):
+                        if '?' in l['text']:
+                            q_idx = i
+                            break
+
+                    if q_idx >= 0 and q_idx + 1 < len(lines):
+                        q_part = ' '.join(lines[k]['text'] for k in range(q_idx + 1))
+                        opt_lines = lines[q_idx + 1:]
+                        
+                        # Group opt_lines into options based on top-level query triggers (e.g. SELECT)
+                        blocks = []
+                        curr_block = []
+                        for ol in opt_lines:
+                            if any(w in ol['text'] for w in ['Next', 'Feedback', 'Previous', 'Skip', 'Submit']):
+                                continue
+                            # New option starts if it starts with SELECT or explicit option letter
+                            is_new_opt = bool(re.match(r'^\s*(?:SELECT\b|[A-F][\.\)\:\s])', ol['text'], re.IGNORECASE))
+                            if is_new_opt and curr_block:
+                                blocks.append(' '.join(curr_block))
+                                curr_block = []
+                            curr_block.append(ol['text'])
+                        if curr_block:
+                            blocks.append(' '.join(curr_block))
+
+                        if len(blocks) < 2:
+                            # Fallback: treat each line (or gap) in opt_lines as a distinct option
+                            candidate_lines = [ol['text'].strip() for ol in opt_lines if not any(w in ol['text'] for w in ['Next', 'Feedback', 'Previous', 'Skip', 'Submit']) and ol['text'].strip()]
+                            if 2 <= len(candidate_lines) <= 6:
+                                blocks = candidate_lines
+
+                        if len(blocks) >= 2:
+                            letters = ['A', 'B', 'C', 'D', 'E', 'F']
+                            formatted_opts = []
+                            for idx, b in enumerate(blocks[:6]):
+                                clean_b = re.sub(r'^[A-F][\.\)\:\s]+', '', b).strip()
+                                formatted_opts.append(f"{letters[idx]} {clean_b}")
+                            ocr_text = f"{q_part} " + " ".join(formatted_opts)
+                        else:
+                            ocr_text = " ".join(l['text'] for l in lines)
+                    else:
+                        ocr_text = " ".join(l['text'] for l in lines)
+            except Exception:
+                pass
 
         # Fallback / Hint-based parsing if OCR is empty
         detected = []

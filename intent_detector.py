@@ -320,6 +320,7 @@ _MILITARY_HISTORY_RE = re.compile(
 # Routing table: intent_type -> (needs_web, confidence)
 # ---------------------------------------------------------------------------
 _ROUTING: dict = {
+    "QUIZ":             (True,  0.99),  # Quiz Agent — MCQ with option parsing & DQN selection
     "MILITARY_HISTORY": (True,  0.96),  # Historical Conflict Agent — needs web/historical sources
     "CURRENCY":         (True,  0.99),  # live exchange rate — always web
     "WEATHER":         (True,  0.98),
@@ -407,6 +408,17 @@ def _heuristic_intent(query: str) -> IntentResult | None:
     Order is critical — CURRENT_FACT is checked before BIOGRAPHY so that
     'who is president of X' never misclassifies as BIOGRAPHY/FACTOID.
     """
+    from agents.quiz_agent import is_quiz_query
+    if is_quiz_query(query):
+        needs_web, conf = _ROUTING["QUIZ"]
+        return IntentResult(
+            intent_type="QUIZ",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=[w for w in re.findall(r'\w+', query.lower()) if len(w) > 2],
+            reasoning="Heuristic: query is structured as a multiple-choice quiz question.",
+        )
+
     words = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 2]
     # ── MILITARY_HISTORY: "battles" / "wars" / "conflict" ──────────────────
     if _MILITARY_HISTORY_RE.search(query):
