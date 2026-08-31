@@ -528,7 +528,8 @@ def _extract_answer_from_context(question: str, context: str) -> str:
     ans_type = detect_answer_type(question)
     q_lower = question.lower()
 
-    if ans_type.answer_type == "MILITARY_HISTORY" or "battle" in q_lower or "war" in q_lower:
+    is_outcome_q = any(k in q_lower for k in ("who won", "winner", "won the", "victorious", "outcome", "result", "who defeated", "who beat", "champion", "who lost", "champions"))
+    if is_outcome_q or ans_type.answer_type == "MILITARY_HISTORY" or "battle" in q_lower or "war" in q_lower or "conflict" in q_lower:
         mil_ans = _format_military_history_response(question, context)
         if mil_ans:
             return mil_ans
@@ -559,105 +560,452 @@ def _extract_answer_from_context(question: str, context: str) -> str:
 
     entity_type = _expected_entity_type(question)
 
-    if any(w in q_lower for w in ("credit card", "debit card", "how to use a credit card")):
-        return (
-            "Here is a complete step-by-step guide on how to use a credit card safely and effectively:\n\n"
-            "1. Activation: Activate your physical credit card online or by calling the bank's toll-free number.\n"
-            "2. In-Store Purchases: Insert the EMV chip into the card reader terminal, tap for contactless payment, or swipe the magnetic stripe. Enter your 4-digit PIN if prompted.\n"
-            "3. Online Purchases: Enter your 16-digit card number, expiration date (MM/YY), and 3-digit CVV security code located on the back of the card.\n"
-            "4. Credit Limit & Billing: Keep your spending within your assigned credit limit. Aim to keep credit utilization below 30%.\n"
-            "5. Monthly Payments: Pay off your full statement balance on or before the monthly due date to avoid interest charges and late fees, and build a strong credit score."
-        )
+    if entity_type == "VICTOR":
+        mil_ans = _format_military_history_response(question, context)
+        if mil_ans:
+            return mil_ans
 
-    if any(w in q_lower for w in ("workout", "exercise plan", "fitness plan", "gym plan", "workout plan", "routine")):
-        return _format_workout_plan_routine(question, context)
+    elif entity_type == "CREATOR":
+        creator_ans = _format_creator_inventor_answer(question, context)
+        if creator_ans:
+            return creator_ans
 
-    if entity_type == "PERSON":
-        persons = _extract_persons(context)
-        if persons:
-            best_person = _find_best_person_for_role(question, context, persons)
-            best_person = _expand_person_name(best_person, context)
-            return _format_person_answer(question, best_person, context)
+    elif entity_type == "DATE":
+        when_ans = _format_when_answer(question, context)
+        if when_ans:
+            return when_ans
+
+    elif entity_type == "LOCATION":
+        loc_ans = _format_location_where_answer(question, context)
+        if loc_ans:
+            return loc_ans
+
+    elif entity_type == "CHOICE":
+        choice_ans = _format_which_choice_answer(question, context)
+        if choice_ans:
+            return choice_ans
+
+    elif entity_type == "CAUSE":
+        cause_ans = _format_why_cause_answer(question, context)
+        if cause_ans:
+            return cause_ans
+
+    elif entity_type == "MECHANISM":
+        mech_ans = _format_how_mechanism_answer(question, context)
+        if mech_ans:
+            return mech_ans
+
+    elif entity_type == "DEFINITION":
+        concept_ans = _format_conceptual_explanation(question, context)
+        if concept_ans:
+            return concept_ans
 
     elif entity_type == "DURATION":
         durations = _extract_durations(context)
         if durations:
-            first_dur = durations[0]
-            return _format_entity_paragraph(question, first_dur, context)
-
-    elif entity_type == "DATE":
-        dates = _extract_dates(context)
-        if dates:
-            best_date = _select_best_date(question, context, dates)
-            return _format_entity_paragraph(question, best_date, context)
+            return _format_entity_paragraph(question, durations[0], context)
 
     elif entity_type == "NUMBER":
         numbers = _extract_numbers(context)
         if numbers:
             return _format_entity_paragraph(question, numbers[0], context)
 
-    elif entity_type == "LOCATION":
-        locations = _extract_locations(context)
-        if locations:
-            return _format_entity_paragraph(question, locations[0], context)
+    elif entity_type == "PERSON":
+        persons = _extract_persons(context)
+        if persons:
+            best_person = _find_best_person_for_role(question, context, persons)
+            best_person = _expand_person_name(best_person, context)
+            return _format_person_answer(question, best_person, context)
 
-    # No typed entity found — try generic person extraction as fallback
-    # (many factoid questions expect a person name even if not detected by the regex)
-    persons = _extract_persons(context)
-    if persons and ("who" in q_lower):
-        person = _expand_person_name(persons[0], context)
-        return _format_person_answer(question, person, context)
+    # Fallback to general question extractors
+    if "when" in q_lower:
+        when_ans = _format_when_answer(question, context)
+        if when_ans:
+            return when_ans
+    if "where" in q_lower:
+        loc_ans = _format_location_where_answer(question, context)
+        if loc_ans:
+            return loc_ans
+    if "which" in q_lower:
+        choice_ans = _format_which_choice_answer(question, context)
+        if choice_ans:
+            return choice_ans
+    if "why" in q_lower:
+        cause_ans = _format_why_cause_answer(question, context)
+        if cause_ans:
+            return cause_ans
+    if "how" in q_lower:
+        mech_ans = _format_how_mechanism_answer(question, context)
+        if mech_ans:
+            return mech_ans
+    if "who" in q_lower:
+        creator_ans = _format_creator_inventor_answer(question, context)
+        if creator_ans:
+            return creator_ans
+        persons = _extract_persons(context)
+        if persons:
+            person = _expand_person_name(persons[0], context)
+            return _format_person_answer(question, person, context)
 
     return ""
 
 
+def _format_when_answer(question: str, context: str) -> str:
+    """Synthesizes clean temporal answers for 'when did/was/is/in what year' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    from answerability_agent import _extract_dates
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    dates = _extract_dates(clean_ctx)
+    if not dates:
+        dates = re.findall(r'\b\d{4}\s*[-–—]\s*\d{2,4}\b|\b\d{4}\b', clean_ctx)
+    if not dates:
+        return ""
+
+    best_date = _select_best_date(question, clean_ctx, dates) if dates else ""
+    sentences = split_clean_sentences(clean_ctx)
+
+    # Subject extraction
+    q_clean = question.strip().rstrip('?')
+    m_subj = re.search(r'\b(?:when\s+(?:was|did|is|were|will\s+be)|in\s+what\s+year\s+(?:did|was|is))\s+(?:the\s+)?(.+)', q_clean, re.IGNORECASE)
+    subject = m_subj.group(1).strip() if m_subj else q_clean
+
+    supporting = [s for s in sentences if best_date.lower() in s.lower() and not s.endswith("...")][:2]
+    details = " ".join(supporting) if supporting else (" ".join(sentences[:2]) if sentences else "")
+
+    if best_date:
+        return f"**{subject.title()}** occurred/was established in **{best_date}**.\n\n{details}"
+    return details
+
+
+def _format_creator_inventor_answer(question: str, context: str) -> str:
+    """Synthesizes clean answers for 'who invented/created/wrote/founded/directed/discovered' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    from answerability_agent import _extract_persons
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    persons = _extract_persons(clean_ctx)
+    q_clean = question.strip().rstrip('?')
+    
+    m_verb = re.search(r'\bwho\s+(invented|created|discovered|wrote|founded|designed|developed|built|directed|authored|composed|painted)\s+(?:the\s+)?(.+)', q_clean, re.IGNORECASE)
+    verb = m_verb.group(1).strip().lower() if m_verb else "created"
+    target = m_verb.group(2).strip() if m_verb else q_clean
+
+    # Match creator dynamically in context e.g. "X invented Y in 1905"
+    creator = None
+    m_direct = re.search(r'\b([A-Z][a-zA-Záéíóú\s.-]+?)\s+(?:invented|created|discovered|wrote|founded|designed|developed|authored|directed)\s+(?:the\s+)?' + re.escape(target), clean_ctx, re.IGNORECASE)
+    if m_direct and len(m_direct.group(1).strip()) <= 40:
+        creator = m_direct.group(1).strip()
+    elif persons:
+        creator = persons[0]
+
+    sentences = split_clean_sentences(clean_ctx)
+    supporting = [s for s in sentences if creator and creator.lower() in s.lower() and not s.endswith("...")][:2]
+    details = " ".join(supporting) if supporting else (" ".join(sentences[:2]) if sentences else "")
+
+    if creator:
+        return f"**{creator}** {verb} **{target.title()}**.\n\n{details}"
+    return details
+
+
+def _format_location_where_answer(question: str, context: str) -> str:
+    """Synthesizes clean geographic answers for 'where is/was/located/did' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    from answerability_agent import _extract_locations
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    locs = _extract_locations(clean_ctx)
+    sentences = split_clean_sentences(clean_ctx)
+    q_clean = question.strip().rstrip('?')
+
+    m_subj = re.search(r'\b(?:where\s+(?:is|was|are|were|did)|in\s+what\s+(?:city|country|place|location)\s+(?:is|was))\s+(?:the\s+)?(.+)', q_clean, re.IGNORECASE)
+    subject = m_subj.group(1).strip() if m_subj else q_clean
+
+    best_loc = locs[0] if locs else ""
+    supporting = [s for s in sentences if best_loc and best_loc.lower() in s.lower() and not s.endswith("...")][:2]
+    details = " ".join(supporting) if supporting else (" ".join(sentences[:2]) if sentences else "")
+
+    if best_loc:
+        return f"**{subject.title()}** is located in **{best_loc}**.\n\n{details}"
+    return details
+
+
+def _format_which_choice_answer(question: str, context: str) -> str:
+    """Synthesizes clean choice/selection answers for 'which one/is/are/country/city' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    sentences = split_clean_sentences(clean_ctx)
+    if not sentences:
+        return clean_ctx[:300]
+
+    # Find the sentence matching superlative/selection attributes
+    selected_s = sentences[0]
+    for s in sentences:
+        if any(term in s.lower() for term in ('largest', 'smallest', 'oldest', 'earliest', 'highest', 'longest', 'first', 'primary', 'main', 'most')):
+            selected_s = s
+            break
+
+    return f"{selected_s}\n\n" + " ".join([s for s in sentences[1:3] if not s.endswith("...")])
+
+
+def _format_why_cause_answer(question: str, context: str) -> str:
+    """Synthesizes clean causal/reasoning answers for 'why did/does/what caused' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    sentences = split_clean_sentences(clean_ctx)
+    q_clean = question.strip().rstrip('?')
+
+    m_subj = re.search(r'\b(?:why\s+(?:did|does|do|is|was|were)|what\s+(?:caused|led\s+to|triggered))\s+(?:the\s+)?(.+)', q_clean, re.IGNORECASE)
+    subject = m_subj.group(1).strip() if m_subj else q_clean
+
+    causal_sentences = []
+    for s in sentences:
+        if any(term in s.lower() for term in ('because', 'due to', 'caused by', 'led to', 'as a result', 'reason', 'triggered by', 'originated', 'consequence')):
+            causal_sentences.append(s)
+
+    details = " ".join(causal_sentences[:2]) if causal_sentences else " ".join(sentences[:2])
+    return f"**Causes and Reasoning for {subject.title()}:**\n\n{details}"
+
+
+def _format_how_mechanism_answer(question: str, context: str) -> str:
+    """Synthesizes clean mechanism and process answers for 'how does/did/is/to' queries."""
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
+
+    sentences = split_clean_sentences(clean_ctx)
+    q_clean = question.strip().rstrip('?')
+
+    m_subj = re.search(r'\b(?:how\s+(?:does|did|do|is|was|can|to))\s+(?:the\s+)?(.+)', q_clean, re.IGNORECASE)
+    subject = m_subj.group(1).strip() if m_subj else q_clean
+
+    return f"**Mechanism & Operation of {subject.title()}:**\n\n" + " ".join(sentences[:3])
+
+
 def _format_military_history_response(question: str, context: str) -> str:
     """
-    Formats a clean, authoritative military history response.
-    Strips site titles/chrome and provides structured counts/details for historical wars and battles.
+    Synthesizes a structured, authoritative conflict/military history answer from retrieved context.
+    Extracts victor, belligerents, treaties, dates, and historical outcomes dynamically without hardcoding.
     """
-    q_lower = question.lower()
+    from generator import strip_retrieval_chrome, split_clean_sentences
+    clean_ctx = strip_retrieval_chrome(context)
+    if not clean_ctx:
+        return ""
 
-    is_india_pak = ("india" in q_lower or "indian" in q_lower) and "pakistan" in q_lower
-    is_count_query = any(k in q_lower for k in ("how many", "count", "number of", "win", "won", "victor"))
+    # Remove incomplete trailing fragments like "The result of the conflict was a ..."
+    clean_ctx = re.sub(r'(?<=[.!?])\s+[A-Z][^\n.!?]{0,50}\.\.\.\s*$', '', clean_ctx).strip()
 
-    if is_india_pak and is_count_query:
-        return (
-            "**India–Pakistan Military Conflicts & Victories Count**\n\n"
-            "India and Pakistan have fought **4 formal major wars** plus major military operations:\n\n"
-            "1. **1947–1948 First Kashmir War**: Fought over Jammu & Kashmir. Ended in a UN-brokered ceasefire establishing the Line of Control (Inconclusive).\n"
-            "2. **1965 Indo-Pakistani War**: Second war fought over Kashmir; involved massive armor/tank battles. Ended in a UN-brokered ceasefire and Tashkent Declaration (Inconclusive).\n"
-            "3. **1971 Indo-Pakistani War (Bangladesh Liberation War)**: **Decisive Indian Victory**. Led to the independence of Bangladesh and the surrender of ~93,000 Pakistani soldiers.\n"
-            "4. **1984 Siachen Conflict (Operation Meghdoot)**: **Decisive Indian Victory**. Indian Armed Forces captured and established control over the Siachen Glacier.\n"
-            "5. **1999 Kargil War (Operation Vijay)**: **Decisive Indian Victory**. Indian forces successfully recaptured all occupied high-altitude posts in Kargil.\n\n"
-            "**Summary Count:**\n"
-            "• Total Major Wars & Conflicts: **5**\n"
-            "• Decisive Indian Victories: **3** (1971 War, 1984 Siachen, 1999 Kargil War)\n"
-            "• Ceasefires / Inconclusive: **2** (1947–48 and 1965 Wars)"
+    q_clean = question.strip().rstrip('?')
+    q_lower = q_clean.lower()
+
+    # 1. Identify specific conflict/event name from question
+    m_subject = re.search(
+        r'\b(?:who won|outcome of|winner of|who was victorious in|who defeated whom in|result of|summary of)\s+(?:the\s+)?(.+)',
+        q_clean, re.IGNORECASE
+    )
+    if m_subject:
+        conflict_name = m_subject.group(1).strip()
+    else:
+        conflict_name = re.sub(r'\b(?:who won|winner of|winner|champion of|champion|champions|outcome of|result of|who is|who are)\b', '', q_clean, flags=re.IGNORECASE).strip(' ?:')
+        if not conflict_name:
+            conflict_name = q_clean
+
+    conflict_name = re.sub(r'^(?:the|a|an)\s+', '', conflict_name, flags=re.IGNORECASE).strip()
+
+    sentences = split_clean_sentences(clean_ctx)
+
+    # 2. Extract Victor / Winner dynamically from retrieved evidence
+    victor = None
+
+    # Dynamic contextual entity extraction from proper nouns present in context
+    proper_nouns = sorted(list(set(re.findall(r'\b(?:[A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)*)\b', clean_ctx))), key=len)
+
+    def _normalize_entity(raw: str) -> str:
+        cleaned = raw.strip().rstrip('.,;:')
+        cleaned = re.sub(r'^(?:the|an?|its|all|of\s+the|two\s+of\s+the|get|see|watch|read|check|follow|live|defending\s+champions?|reigning\s+champions?|former\s+champions?|armies\s+of\s+the|forces\s+of\s+the)\s+', '', cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\'s.*$', '', cleaned).strip()
+        cleaned = re.sub(r'\s+(?:army|forces|navy|military|command|troops|government|regime|administration)$', '', cleaned, flags=re.IGNORECASE).strip()
+
+        # Demonym alignment only for single-word descriptors (e.g. British -> Great Britain, Indian -> India)
+        if len(cleaned.split()) == 1:
+            stem = re.sub(r'(?:ian|an|ish|ese|ic|i|ine)$', '', cleaned.lower()).strip()
+            if len(stem) >= 3:
+                for pn in proper_nouns:
+                    pn_clean = re.sub(r'^(?:the|an?|get|see|watch|read|check|follow|live)\s+', '', pn, flags=re.IGNORECASE).strip()
+                    pn_core = re.sub(r'\s+(?:army|forces|navy|military|command|troops)$', '', pn_clean, flags=re.IGNORECASE).strip()
+                    if stem in pn_core.lower() and pn_core.lower() != cleaned.lower():
+                        return pn_core
+        return cleaned
+
+    VICTORY_DESCRIPTORS = {
+        'dramatic', 'historic', 'stunning', 'famous', 'narrow', 'epic', 'crushing',
+        'resounding', 'massive', 'thrilling', 'emphatic', 'hard-fought', 'great',
+        'huge', 'unprecedented', 'remarkable', 'convincing', 'memorable', 'shocking',
+        'surprise', 'a', 'the', 'their', 'this', 'first', 'second', 'third', 'major',
+        'decisive', 'pyrrhic', 'total', 'final', 'sealing'
+    }
+
+    # Pattern A: Adjectival / direct victory (e.g. "British victory", "decisive Indian victory", "Union victory")
+    m_vic = re.search(
+        r'\b(?:decisive\s+|major\s+|resounding\s+|strategic\s+|complete\s+|dramatic\s+|historic\s+|stunning\s+|famous\s+|narrow\s+|epic\s+)?([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+victory\b',
+        clean_ctx, re.IGNORECASE
+    )
+    if m_vic:
+        cand = m_vic.group(1).strip()
+        cand = re.sub(r'^(?:decisive|major|resounding|strategic|complete|dramatic|historic|stunning|famous|narrow|epic)\s+', '', cand, flags=re.IGNORECASE).strip()
+        if cand.lower() not in VICTORY_DESCRIPTORS and not cand.lower().endswith('ing'):
+            victor = _normalize_entity(cand)
+
+    # Pattern B: "[Party] won / emerged victorious / emerged as winners / crowned champions"
+    if not victor:
+        m_won = re.search(
+            r'\b(?:the\s+)?([A-Z][a-zA-Z0-9\'-]+(?:\s+[A-Z][a-zA-Z0-9\'-]+)*)\s+(?:won|emerged victorious in|defeated|triumphed in|secured victory in|emerged as the winners?|crowned champions?|named champions?)\b',
+            clean_ctx, re.IGNORECASE
         )
+        if m_won and len(m_won.group(1).strip()) <= 45:
+            cand_raw = m_won.group(1).strip()
+            if cand_raw.lower() not in VICTORY_DESCRIPTORS and not cand_raw.lower().endswith('ing'):
+                victor = _normalize_entity(cand_raw)
 
-    from generator import strip_retrieval_chrome
-    cleaned = strip_retrieval_chrome(context)
-    return cleaned if cleaned else ""
+    # Pattern C: "won the [match / final / tournament / conflict]"
+    if not victor:
+        m_won2 = re.search(
+            r'\b(?:the\s+)?([A-Z][a-zA-Z0-9\'-]+(?:\s+[A-Z][a-zA-Z0-9\'-]+)?)\s+(?:won|clinched|lifted|secured|claimed)\s+(?:the\s+)?(?:first|second|third)?\s*(?:[a-zA-Z0-9\s-]{0,20}?\s+)?(?:match|final|tournament|title|trophy|cup|championship|league|series|game|war|battle|conflict)\b',
+            clean_ctx, re.IGNORECASE
+        )
+        if m_won2:
+            cand_raw = m_won2.group(1).strip()
+            if cand_raw.lower() not in VICTORY_DESCRIPTORS and not cand_raw.lower().endswith('ing'):
+                victor = _normalize_entity(cand_raw)
 
+    # Pattern D: "Surrendered to [Winner]" or "instrument of surrender ... in the presence of [Winner]"
+    if not victor:
+        m_surr = re.search(
+            r'\b(?:surrendered\s+(?:[a-zA-Z0-9\s-]+?\s+)?to\s+(?:the\s+)?|surrender\s+(?:of\s+[A-Za-z\s]+)?\s*to\s+(?:the\s+)?|instrument\s+of\s+surrender.*?in\s+the\s+presence\s+of\s+)([A-Z][a-zA-Z\s\'-]+?)(?=[.,;\n\)]|\bhence\b|\bending\b|$)',
+            clean_ctx, re.IGNORECASE
+        )
+        if m_surr:
+            cand_surr = _normalize_entity(m_surr.group(1))
+            if cand_surr and len(cand_surr) <= 40:
+                victor = cand_surr
 
-def _format_workout_plan_routine(question: str, context: str) -> str:
-    """
-    Formats a structured, actionable 7-Day Workout Routine for the user.
-    Strips out website publication dates (e.g. 'January 12, 2026 -') and web noise.
-    """
-    clean_ctx = re.sub(r'^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s+-\s*', '', context, flags=re.I)
-    clean_ctx = re.sub(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\s+-\s*', '', clean_ctx, flags=re.I)
+    # Pattern E: "[Loser] was defeated by [Winner]" or "[Winner] routed [Loser]"
+    if not victor:
+        m_def_by = re.search(
+            r'\b(?:was|were)\s+defeated\s+by\s+(?:[a-zA-Z0-9\s-]+?\s+)?(?:the\s+)?([A-Z][a-zA-Z\s\'-]+?)(?=[.,;\n\)]|$)',
+            clean_ctx, re.IGNORECASE
+        )
+        if m_def_by:
+            cand_def = _normalize_entity(m_def_by.group(1))
+            if cand_def and len(cand_def) <= 40:
+                victor = cand_def
+
+    # Pattern F: "[Winner] defeated [Loser]"
+    if not victor:
+        m_won_def = re.search(
+            r'\b([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)*)\s+(?:defeated|routed|triumphed\s+over|forced\s+the\s+surrender\s+of)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)*)',
+            clean_ctx
+        )
+        if m_won_def:
+            cand_w = _normalize_entity(m_won_def.group(1))
+            if cand_w and cand_w.lower() not in ('after', 'before', 'during', 'when', 'while') and not cand_w.lower().endswith('ing'):
+                victor = cand_w
+
+    # Pattern G: "[Winner] won/lifted/secured title/trophy/cup/championship"
+    if not victor:
+        m_title = re.search(
+            r'\b([A-Z][a-zA-Z\s.-]+?)\s+(?:won|lifted|secured|claimed|retained)\s+(?:their\s+)?(?:[a-zA-Z0-9\s-]+?\s+)?(?:title|trophy|cup|championship|tournament|league)',
+            clean_ctx, re.IGNORECASE
+        )
+        if m_title and len(m_title.group(1).strip()) <= 45:
+            cand_t = _normalize_entity(m_title.group(1))
+            if cand_t and cand_t.lower() not in ('after', 'before', 'during', 'when', 'while') and not cand_t.lower().endswith('ing'):
+                victor = cand_t
+
+    # 3. Extract dates (e.g. 1839–1842, 1971, 1861–1865)
+    dates = re.findall(r'\b\d{4}\s*[-–—]\s*\d{2,4}\b|\b\d{4}\b', clean_ctx)
+    conflict_dates = [d for d in dates if "-" in d or "–" in d or "—" in d]
+    date_str = f" ({conflict_dates[0]})" if conflict_dates else (f" ({dates[0]})" if dates else "")
+
+    # 4. Extract combatants/belligerents
+    m_bel = re.search(
+        r'\b(?:fought between|between|conflict between)\s+([A-Z][a-zA-Z\s\',.-]+?)\s+and\s+([A-Z][a-zA-Z\s\',.-]+?)(?=[.,;\n\)]|$)',
+        clean_ctx, re.IGNORECASE
+    )
+    belligerents = f" fought between {m_bel.group(1).strip()} and {m_bel.group(2).strip()}" if m_bel else ""
+
+    # 5. Extract clean consequence & treaty sentences
+    key_sentences = []
+    seen_s = set()
+    for s in sentences:
+        s_clean = s.strip()
+        if len(s_clean) < 25 or s_clean.lower() in seen_s or s_clean.endswith("..."):
+            continue
+        seen_s.add(s_clean.lower())
+        if any(term in s_clean.lower() for term in ('treaty', 'consequence', 'ceded', 'surrender', 'ended', 'result', 'nanking', 'paris', 'signed', 'established', 'independence', 'annexed', 'line of control', 'tashkent', 'treaties', 'unequal')):
+            key_sentences.append(s_clean)
+
+    if not key_sentences:
+        key_sentences = [s for s in sentences if len(s) > 25 and not s.endswith("...")][:3]
+
+    details = " ".join(key_sentences[:3]) if key_sentences else ""
+
+    # Normalize event/competition/conflict title
+    words = conflict_name.split()
+    formatted_words = []
+    for w in words:
+        if w.upper() in ('IPL', 'FIFA', 'NBA', 'NFL', 'ICC', 'USA', 'UK', 'US', 'UEFA', 'UFC', 'WWE', 'F1', 'MLB', 'NHL', 'T20', 'ODI', 'BBL', 'PSL', 'EPL', 'KKR', 'CSK', 'RCB', 'SRH', 'MI'):
+            formatted_words.append(w.upper())
+        elif re.match(r'^\d{4}$', w):
+            formatted_words.append(w)
+        else:
+            formatted_words.append(w.capitalize())
+    conflict_title = " ".join(formatted_words)
+
+    # Only append " War" if the user query was explicitly about a military war/conflict
+    is_war_query = any(k in q_lower for k in ('war', 'battle', 'conflict', 'siege', 'campaign', 'invasion'))
+    if is_war_query and not any(w in conflict_title.lower() for w in ('war', 'battle', 'conflict', 'siege', 'cup', 'league', 'tournament', 'championship', 'bowl', 'series')):
+        conflict_title += " War"
+
+    # Extract specific year from query if available
+    q_years = re.findall(r'\b\d{4}\b', question)
+    if q_years:
+        date_str = f" ({q_years[0]})"
+
+    import time as _time
+    current_year = int(_time.strftime("%Y"))
+    is_past_year = any(int(y) < current_year for y in q_years)
+    is_ongoing = not is_past_year and any(term in clean_ctx.lower() for term in ('schedules', 'fixtures', 'points table', 'upcoming', 'scheduled to', 'yet to be', 'live coverage', 'standings', 'ongoing'))
+
+    # 6. Compose clear, direct answer
+    if victor:
+        ans = f"**{victor}** won the **{conflict_title}**{date_str}{belligerents}."
+        if details:
+            ans += f"\n\n{details}"
+        return ans
+
+    if is_ongoing:
+        ans = f"The winner of **{conflict_title}** has not been decided yet as the event/tournament is scheduled or currently in progress."
+        if details:
+            ans += f"\n\n{details}"
+        return ans
 
     return (
-        "Here is a balanced 7-Day Weekly Workout Routine designed for strength, cardio, and active recovery:\n\n"
-        "• Day 1 (Monday) - Upper Body Strength: Bench press/chest press, dumbbell overhead press, lat pulldowns, and tricep extensions (45 min).\n"
-        "• Day 2 (Tuesday) - Cardio & Core: 30 minutes of moderate aerobic cardio (running, cycling, or rowing) + 15 min core stability routine.\n"
-        "• Day 3 (Wednesday) - Lower Body Strength: Barbell squats, Romanian deadlifts, walking lunges, leg press, and calf raises (45 min).\n"
-        "• Day 4 (Thursday) - Active Recovery & Mobility: Restorative yoga, full-body static stretching, and light 20-min brisk walk.\n"
-        "• Day 5 (Friday) - Pull Strength & Back: Pull-ups/lat pulldowns, dumbbell bent-over rows, bicep curls, and face pulls (45 min).\n"
-        "• Day 6 (Saturday) - Aerobic Cardio / HIIT: 30–40 minutes of high-intensity interval training or outdoor sport (150 min weekly cardio goal).\n"
-        "• Day 7 (Sunday) - Full Rest & Recovery: Complete rest day, hydration, and muscle recovery."
+        f"Regarding **{conflict_title}**{date_str}{belligerents}:\n\n"
+        f"{details}"
     )
 
 

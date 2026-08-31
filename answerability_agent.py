@@ -32,10 +32,25 @@ from typing import List, Tuple
 # Entity type detection from question
 # ---------------------------------------------------------------------------
 
-# Patterns that signal the answer should be a PERSON (name)
+# Patterns that signal the answer should be a VICTOR / OUTCOME (sports, wars, elections)
+_VICTOR_QUESTION_RE = re.compile(
+    r'\b(who\s+(won|defeated|beat|triumphed\s+in|conquered|secured\s+victory)|'
+    r'winner\s+of|champion\s+of|victorious\s+in|who\s+was\s+victorious|'
+    r'outcome\s+of|result\s+of)\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a CREATOR / INVENTOR / FOUNDER / AUTHOR
+_CREATOR_QUESTION_RE = re.compile(
+    r'\bwho\s+(invented|created|discovered|wrote|founded|designed|developed|'
+    r'built|directed|authored|formulated|established|composed|painted|sculpted|introduced)\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a PERSON (name or role)
 _PERSON_QUESTION_RE = re.compile(
     r'\b('
-    r'who\s+(is|was|are|were|has been|became|will be)\b'
+    r'who\s+(is|was|are|were|has\s+been|became|will\s+be|did|led|heads|leads|serves\s+as)\b'
     r'|'
     r'who\s+(is|was)\s+the\s+(current\s+|incumbent\s+|former\s+|present\s+)?'
     r'(president|prime\s+minister|minister|ceo|head|leader|chancellor|'
@@ -48,7 +63,7 @@ _PERSON_QUESTION_RE = re.compile(
 
 # Patterns that signal the answer should be a DURATION / TIMEFRAME
 _DURATION_QUESTION_RE = re.compile(
-    r'\b(how\s+long\b|duration\b|how\s+many\s+(years|centuries|decades|months|days)\b)',
+    r'\b(how\s+long\b|duration\b|how\s+many\s+(years|centuries|decades|months|days|hours|minutes)\b)',
     re.IGNORECASE,
 )
 
@@ -63,7 +78,7 @@ _NUMBER_QUESTION_RE = re.compile(
 
 # Patterns that signal the answer should be a DATE or YEAR
 _DATE_QUESTION_RE = re.compile(
-    r'\b(when\s+(was|did|is|were|are)|'
+    r'\b(when\s+(was|did|is|were|are|will\s+be)|'
     r'what\s+(year|date|time|day|month|century)\s+(was|did|is|were|are)|'
     r'in\s+what\s+year)\b',
     re.IGNORECASE,
@@ -71,28 +86,69 @@ _DATE_QUESTION_RE = re.compile(
 
 # Patterns that signal the answer should be a LOCATION / PLACE
 _LOCATION_QUESTION_RE = re.compile(
-    r'\b(where\s+(is|was|are|were|did)|'
+    r'\b(where\s+(is|was|are|were|did|can\s+we\s+find|is\s+located)|'
     r'in\s+what\s+(city|country|place|region|state|continent|location)|'
     r'what\s+(city|country|capital|place)\s+(is|was|are|were))\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a CHOICE / SELECTION
+_CHOICE_QUESTION_RE = re.compile(
+    r'\bwhich\s+(one|is|are|was|were|country|city|state|team|player|species|type|kind|option|has|had)\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a CAUSE / REASON
+_CAUSE_QUESTION_RE = re.compile(
+    r'\b(why\s+(did|does|do|is|was|were|are)|'
+    r'what\s+(caused|led\s+to|triggered|is\s+the\s+reason\s+for|are\s+the\s+causes\s+of))\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a MECHANISM / PROCESS
+_MECHANISM_QUESTION_RE = re.compile(
+    r'\b(how\s+(does|did|do|is|was|can|to)\b|'
+    r'how\s+does\s+.*?\s+(work|operate|function)|'
+    r'process\s+of|mechanism\s+of)\b',
+    re.IGNORECASE,
+)
+
+# Patterns that signal the answer should be a DEFINITION / CONCEPT
+_DEFINITION_QUESTION_RE = re.compile(
+    r'\b(what\s+(is|was|are|were|does\s+.*?\s+mean)\b|'
+    r'define\b|meaning\s+of\b)',
     re.IGNORECASE,
 )
 
 
 def _expected_entity_type(question: str) -> str:
     """
-    Determines the type of entity the question expects as its answer.
-    Returns: 'PERSON' | 'DURATION' | 'DATE' | 'NUMBER' | 'LOCATION' | 'NONE'
+    Determines the type of entity or answer the question expects:
+      'VICTOR' | 'CREATOR' | 'DATE' | 'LOCATION' | 'DURATION' | 'NUMBER' |
+      'CHOICE' | 'CAUSE' | 'MECHANISM' | 'DEFINITION' | 'PERSON' | 'NONE'
     """
-    if _PERSON_QUESTION_RE.search(question):
-        return "PERSON"
-    if _DURATION_QUESTION_RE.search(question):
-        return "DURATION"
+    if _VICTOR_QUESTION_RE.search(question):
+        return "VICTOR"
+    if _CREATOR_QUESTION_RE.search(question):
+        return "CREATOR"
     if _DATE_QUESTION_RE.search(question):
         return "DATE"
-    if _NUMBER_QUESTION_RE.search(question):
-        return "NUMBER"
     if _LOCATION_QUESTION_RE.search(question):
         return "LOCATION"
+    if _DURATION_QUESTION_RE.search(question):
+        return "DURATION"
+    if _NUMBER_QUESTION_RE.search(question):
+        return "NUMBER"
+    if _CHOICE_QUESTION_RE.search(question):
+        return "CHOICE"
+    if _CAUSE_QUESTION_RE.search(question):
+        return "CAUSE"
+    if _MECHANISM_QUESTION_RE.search(question):
+        return "MECHANISM"
+    if _PERSON_QUESTION_RE.search(question):
+        return "PERSON"
+    if _DEFINITION_QUESTION_RE.search(question):
+        return "DEFINITION"
     return "NONE"
 
 
@@ -344,9 +400,30 @@ def _extract_locations(text: str) -> List[str]:
     )
 
 
+def _extract_victors(text: str) -> List[str]:
+    """Extracts winning teams, nations, combatants, or surrender recipients from text."""
+    victors = []
+    # Match adjectival or noun victory: "British victory", "decisive Indian victory", "Union victory"
+    for m in re.finditer(r'\b(?:decisive\s+|major\s+|resounding\s+|strategic\s+|complete\s+|dramatic\s+)?([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+victory\b', text, re.IGNORECASE):
+        v = m.group(1).strip()
+        if v.lower() not in ('a', 'the', 'their', 'this', 'first', 'second', 'major', 'decisive'):
+            victors.append(v)
+    # Match surrender/defeat: "surrendered to the Indian Army", "defeated France"
+    for m in re.finditer(r'\b(?:surrendered\s+(?:[a-zA-Z0-9\s-]+?\s+)?to\s+(?:the\s+)?|defeated\s+|routed\s+|instrument\s+of\s+surrender.*?presence\s+of\s+)([A-Z][a-zA-Z\s\'-]+?)(?=[.,;\n\)]|$)', text, re.IGNORECASE):
+        cand = m.group(1).strip()
+        if len(cand) >= 3 and len(cand) <= 40:
+            victors.append(cand)
+    # Fallback to proper noun countries/belligerents
+    if not victors:
+        victors = _extract_persons(text)
+    return victors
+
+
 def _extract_entities(text: str, entity_type: str) -> List[str]:
     """Dispatches entity extraction based on expected type."""
-    if entity_type == "PERSON":
+    if entity_type == "VICTOR":
+        return _extract_victors(text)
+    if entity_type in ("PERSON", "CREATOR"):
         return _extract_persons(text)
     if entity_type == "DURATION":
         return _extract_durations(text)
@@ -356,6 +433,9 @@ def _extract_entities(text: str, entity_type: str) -> List[str]:
         return _extract_numbers(text)
     if entity_type == "LOCATION":
         return _extract_locations(text)
+    if entity_type in ("CHOICE", "CAUSE", "MECHANISM", "DEFINITION"):
+        # For qualitative/conceptual types, any non-trivial informative sentence is valid
+        return [text[:100]] if len(text.strip()) > 30 else []
     return []
 
 

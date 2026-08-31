@@ -199,5 +199,136 @@ def call_mcp_tool(req: MCPRequest):
     raise HTTPException(status_code=400, detail="Provide raw_json or tool_name/arguments.")
 
 
+@app.post("/api/modes/research")
+def execute_deep_research(req: QueryRequest):
+    """Executes multi-source Deep Research Mode and Causal Analysis synthesis."""
+    if not req.query or not req.query.strip():
+        raise HTTPException(status_code=400, detail="Topic cannot be empty.")
+    try:
+        from causal_research_engine import execute_causal_research
+        report = execute_causal_research(req.query.strip())
+        return {
+            "status": "success",
+            "mode": "CAUSAL_RESEARCH",
+            "topic": report.topic,
+            "anchor_entity": report.anchor_entity,
+            "executive_summary": report.executive_summary,
+            "primary_causes": report.primary_causes,
+            "contributing_factors": report.contributing_factors,
+            "transmission_mechanisms": report.transmission_mechanisms,
+            "amplification_mechanisms": report.amplification_mechanisms,
+            "triggers_and_catalysts": report.triggers_and_catalysts,
+            "systemic_consequences": report.systemic_consequences,
+            "causal_graph": [
+                {
+                    "factor": n.factor_name,
+                    "role": n.role.value,
+                    "description": n.description,
+                    "leads_to": n.leads_to,
+                    "evidence": n.evidence_summary
+                }
+                for n in report.causal_graph
+            ],
+            "causal_edges": [
+                {
+                    "source": e.source_factor,
+                    "target": e.target_factor,
+                    "relationship": e.relationship_label,
+                    "evidence": e.evidence_snippet,
+                    "source_title": e.supporting_source_title,
+                    "confidence": e.confidence
+                }
+                for e in report.causal_edges
+            ],
+            "verified_claims": [
+                {
+                    "claim": c.claim_text,
+                    "role": c.causal_role.value,
+                    "status": c.support_status,
+                    "confidence": c.confidence,
+                    "supporting_sources": c.supporting_sources,
+                    "contradicting_sources": c.contradicting_sources,
+                    "evidence_snippets": c.evidence_snippets,
+                    "nuance_note": c.nuance_note
+                }
+                for c in report.verified_claims
+            ],
+            "contradiction_analysis": [
+                {
+                    "claim_a": ca.claim_a,
+                    "source_a": ca.source_a,
+                    "claim_b": ca.claim_b,
+                    "source_b": ca.source_b,
+                    "is_contradiction": ca.is_contradiction,
+                    "reconciliation_nuance": ca.reconciliation_nuance
+                }
+                for ca in report.contradiction_analysis
+            ],
+            "evidence_coverage": {
+                "subtopic_coverage": report.evidence_coverage.subtopic_coverage,
+                "dimension_coverage": report.evidence_coverage.dimension_coverage,
+                "overall_evidence_score": report.evidence_coverage.overall_evidence_score,
+                "is_ready_to_answer": report.evidence_coverage.is_ready_to_answer,
+                "gap_warnings": report.evidence_coverage.gap_warnings
+            },
+            "top_5_evidence_chunks": report.top_5_evidence_chunks,
+            "tier_1_sources_used": report.tier_1_sources_used,
+            "total_sources_analyzed": report.total_sources_analyzed,
+            "cross_source_consensus": report.cross_source_consensus
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/modes/graph")
+def query_knowledge_graph(req: QueryRequest):
+    """Queries entity relations and invariant triples from the Knowledge Graph."""
+    if not req.query or not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    try:
+        from knowledge_graph_engine import get_knowledge_graph
+        kg = get_knowledge_graph()
+        data = kg.query_graph_context(req.query.strip())
+        return {
+            "status": "success",
+            "query": req.query,
+            "matched_entities": data.get("matched_entities", []),
+            "relational_facts": data.get("relational_facts", []),
+            "raw_triples": data.get("raw_triples", [])
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/modes/evaluate")
+def get_evaluation_dashboard():
+    """Returns aggregated evaluation benchmark metrics and failure diagnostics."""
+    try:
+        from evaluation_engine import get_evaluation_engine
+        eval_engine = get_evaluation_engine()
+        return {
+            "status": "success",
+            "dashboard": eval_engine.get_dashboard_metrics()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/modes/adaptive_quiz")
+def get_adaptive_quiz_config(topic: Optional[str] = None):
+    """Returns adaptive learning distribution and weak concept targeting."""
+    try:
+        from agents.quiz_agent import get_user_knowledge_graph
+        kg = get_user_knowledge_graph()
+        distribution = kg.get_adaptive_quiz_distribution(topic=topic)
+        return {
+            "status": "success",
+            "topic": topic or "All Topics",
+            "distribution": distribution
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

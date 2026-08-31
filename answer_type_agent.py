@@ -144,20 +144,9 @@ def format_count_response(query: str, context: str) -> str:
     q_lower = query.lower()
     c_lower = context.lower()
 
-    # Special case: India vs Pakistan military conflicts
-    is_india_pak = ("india" in q_lower or "indian" in q_lower) and "pakistan" in q_lower
-    is_battle_war = any(k in q_lower for k in ("battle", "war", "conflict"))
-
-    if is_india_pak and is_battle_war:
-        return (
-            "India has won 3 decisive major wars/conflicts against Pakistan "
-            "(1971 Bangladesh Liberation War, 1984 Siachen Conflict / Operation Meghdoot, "
-            "and 1999 Kargil War / Operation Vijay) out of 5 major conflicts fought "
-            "(1947–48 and 1965 ended in UN ceasefires)."
-        )
-
-    from generator import strip_retrieval_chrome
+    from generator import strip_retrieval_chrome, split_clean_sentences
     cleaned_ctx = strip_retrieval_chrome(context)
+    sentences = split_clean_sentences(cleaned_ctx)
 
     # Search for explicit count phrases in context (e.g. "3 times", "4 times", "5 major", "won 3", etc.)
     count_match = re.search(

@@ -55,6 +55,9 @@ def strip_retrieval_chrome(text: str) -> str:
     text = _WEB_NOISE_RE.sub("", text)
     text = _WEB_SITE_RE.sub("", text)
     text = re.sub(r'(?i)\bAnswer:\s*', '', text)
+    # Strip search result pipe headers e.g. "First Opium War | Definition, Overview, China, Consequences ...: Aug 22, 2026 ·"
+    text = re.sub(r'(?i)\b[A-Za-z0-9\s,\'–-]+(?:\s*\|\s*[A-Za-z0-9\s,\'–-]+)+\s*:\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s*[·•-]\s*)?', '', text)
+    text = re.sub(r'(?i)\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s*[·•-]\s*', '', text)
 
     cleaned_lines = []
     for raw_line in text.splitlines():
@@ -93,7 +96,10 @@ def split_clean_sentences(text: str, max_len: int = 800) -> list:
     if not cleaned:
         return []
 
-    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    # Protect honorifics, military ranks, initials, and calendar abbreviations from false sentence splits
+    protected = re.sub(r'\b([A-Z])\.', r'\1<DOT>', cleaned)
+    protected = re.sub(r'\b(Lt|Gen|Maj|Col|Capt|Brig|Adm|Cmdr|Sgt|Cpl|Pvt|Dr|Mr|Mrs|Ms|Prof|Gov|Sen|Rep|St|vs|Inc|Ltd|Co|Corp|U\.S|U\.K|Dec|Jan|Feb|Nov|Oct|Aug|Sept|Jul|Jun|Apr|Mar)\.', r'\1<DOT>', protected, flags=re.IGNORECASE)
+    parts = [p.replace('<DOT>', '.') for p in re.split(r'(?<=[.!?])\s+', protected)]
     sentences = []
     for part in parts:
         sentence = part.strip()

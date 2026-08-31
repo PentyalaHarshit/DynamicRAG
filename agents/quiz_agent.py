@@ -209,6 +209,36 @@ class UserKnowledgeGraph:
                 weak.append(mastery.concept)
         return weak
 
+    def get_adaptive_quiz_distribution(self, topic: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Calculates adaptive weighting for subsequent quizzes:
+        Allocates 70% of generation budget to weak concepts, 20% to medium, and 10% random exploration.
+        """
+        weak = []
+        medium = []
+        strong = []
+        for key, mastery in self.concepts.items():
+            if topic and mastery.topic.lower() != topic.lower():
+                continue
+            if mastery.mastery_level == "WEAK":
+                weak.append(mastery.concept)
+            elif mastery.mastery_level == "MEDIUM":
+                medium.append(mastery.concept)
+            else:
+                strong.append(mastery.concept)
+
+        return {
+            "weak_concepts": weak,
+            "medium_concepts": medium,
+            "strong_concepts": strong,
+            "recommended_focus": weak[0] if weak else (medium[0] if medium else (topic or "General")),
+            "weighting_strategy": {
+                "weak_budget_pct": 70 if weak else 0,
+                "medium_budget_pct": 20 if medium else (50 if not weak else 0),
+                "exploration_pct": 10 if (weak or medium) else 100
+            }
+        }
+
     def is_duplicate_question(self, question_text: str, similarity_threshold: float = 0.85) -> bool:
         if not self.question_history:
             return False
@@ -940,6 +970,22 @@ def grade_user_submission(
     weak_concepts = kg.get_weak_concepts(quiz.topic)
     quiz.state = QuestionLifecycleState.GRADED
     
+    # Record diagnostic telemetry in EvaluationEngine
+    try:
+        from evaluation_engine import get_evaluation_engine
+        eval_engine = get_evaluation_engine()
+        eval_engine.evaluate_execution(
+            query=quiz.question,
+            difficulty=quiz.difficulty,
+            retrieved_chunks=[e.chunk for e in quiz.evidence],
+            reasoning_trace={"supported_options": [quiz.correct_label]},
+            predicted_answer=selected_opt.label if selected_opt else "",
+            expected_answer=correct_opt.label if correct_opt else "",
+            is_correct=is_correct
+        )
+    except Exception:
+        pass
+
     evidence_text = "\n".join(f"> \"{e.span}\" (Source: {e.source})" for e in quiz.evidence)
     
     return {
@@ -1134,6 +1180,17 @@ def perform_deep_reasoning_and_option_verification(
 
     facts: List[str] = []
     rules: List[str] = []
+
+    # Knowledge Graph invariant fusion
+    try:
+        from knowledge_graph_engine import get_knowledge_graph
+        kg = get_knowledge_graph()
+        kg_data = kg.query_graph_context(question, max_triples=4)
+        for f in kg_data.get("relational_facts", []):
+            rules.append(f"Knowledge Graph Invariant: {f}")
+    except Exception:
+        pass
+
     for c in top_chunks:
         sents = [s.strip() for s in re.split(r'[\.\n\r]+', c) if len(s.strip()) > 15]
         for s in sents[:3]:

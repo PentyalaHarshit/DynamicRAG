@@ -439,11 +439,10 @@ def _rewrite_search_query(question: str, intent_type: str) -> str:
          site filter so the search engine returns war/battle documents, not sport.
     """
     q = question.strip()
+    q_lower = q.lower()
 
     if intent_type == "MILITARY_HISTORY":
         # Extract the key subject if possible
-        q_lower = q.lower()
-
         # Remove vague quantity phrases — they confuse search engines
         q_clean = re.sub(
             r'\b(how many|how much|what is the number of|tell me about)\b',
@@ -459,6 +458,18 @@ def _rewrite_search_query(question: str, intent_type: str) -> str:
             f"OR site:worldhistory.org OR site:historyofwar.org"
         )
         print(f"[Graph] MILITARY_HISTORY query rewrite: '{q}' -> '{rewritten[:80]}...'")
+        return rewritten
+
+    # For competition / tournament / winner queries with a specific year (e.g. IPL 2024 winner)
+    has_year = re.search(r'\b(\d{4})\b', q)
+    is_winner_q = any(k in q_lower for k in ("winner", "won", "champion", "champions", "victory", "cup", "final"))
+    if has_year and is_winner_q:
+        year_str = has_year.group(1)
+        q_no_year = re.sub(r'\b\d{4}\b', '', q).strip(' ?:')
+        rewritten = f"{year_str} {q_no_year} final winner"
+        if "ipl" in q_lower and "indian premier league" not in q_lower:
+            rewritten += " Indian Premier League"
+        print(f"[Graph] Tournament winner query rewrite: '{q}' -> '{rewritten}'")
         return rewritten
 
     # All other intents: use the raw question as-is
@@ -2364,20 +2375,17 @@ def run_pipeline(question: str, pipeline=None, image_path: Optional[str] = None,
     # Inline entity/operation extraction — no external agent file needed.
     _intent = getattr(res.get("intent"), "intent_type", None) or ""
     if _intent == "MILITARY_HISTORY" or answer_type_res.answer_type == "MILITARY_HISTORY":
-        # ── Entity extraction ──────────────────────────────────────────────
-        _COUNTRY_ALIASES = {
-            "india": "India", "bharat": "India", "hindustan": "India",
-            "pakistan": "Pakistan", "pak": "Pakistan",
-            "china": "China", "prc": "China",
-            "usa": "United States", "america": "United States",
-            "russia": "Russia", "ussr": "Russia",
-        }
-        _q = question.lower()
-        _entities = [canonical for alias, canonical in _COUNTRY_ALIASES.items() if alias in _q]
-        # deduplicate while preserving order (must be two separate statements — list
-        # comprehensions in Python 3 have their own scope, so `seen` must be assigned first)
+        # ── Dynamic entity extraction ──────────────────────────────────────────────
+        from answerability_agent import _extract_locations
+        _q = question.strip()
+        _extracted_locs = _extract_locations(_q)
+        if not _extracted_locs:
+            # Fallback: extract capitalized proper noun phrases from the query
+            _extracted_locs = re.findall(r'\b([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)*)\b', _q)
+            _extracted_locs = [e for e in _extracted_locs if e.lower() not in ('who', 'what', 'when', 'where', 'how', 'why', 'is', 'was', 'the', 'first', 'second')]
+
         _seen = set()
-        _entities = [e for e in _entities if not (e in _seen or _seen.add(e))]
+        _entities = [e for e in _extracted_locs if not (e.lower() in _seen or _seen.add(e.lower()))]
 
         # ── Operation detection ────────────────────────────────────────────
         if re.search(r'\bhow many\b.*(battles?|wars?|conflicts?|engagements?)', _q):

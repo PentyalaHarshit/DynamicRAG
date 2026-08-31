@@ -126,8 +126,9 @@ _CURRENT_FACT_RE = re.compile(
     r'|'
     # temporal / liveness markers
     r'current(ly)?|incumbent|right\s+now|\bnow\b|today\b|'
-    r'latest|recent(ly)?|as\s+of\s+(now|today|2024|2025|2026)|'
-    r'\b(2024|2025|2026)\b'
+    r'present|live\b|'
+    r'latest|recent(ly)?|as\s+of\s+(now|today|\d{4})|'
+    r'\b(20\d{2})\b'
     r'|'
     # price / rate queries
     r'what\s+is\s+the\s+(current\s+)?(price|rate|cost|value|exchange\s+rate)'

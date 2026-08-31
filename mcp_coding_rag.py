@@ -63,6 +63,36 @@ MCP_TOOLS_MANIFEST = [
             },
             "required": ["query"]
         }
+    },
+    {
+        "name": "query_knowledge_graph",
+        "description": "Query Entity-Relation-Entity graph triples and relational invariants.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Entity name or query text to traverse"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "deep_research_synthesis",
+        "description": "Execute multi-source deep research planning, cross-source comparison, and citation synthesis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Research topic or problem to investigate"}
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "get_evaluation_diagnostics",
+        "description": "Get aggregated benchmark metrics and failure diagnosis statistics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -192,6 +222,22 @@ def handle_mcp_request(raw_json: str) -> str:
                 res = mcp_search_codeforces(args.get("problem", ""), args.get("language", "cpp"))
             elif name == "mcp_web_rag_coding_search":
                 res = mcp_web_rag_coding_search(args.get("query", ""), args.get("platform", "all"))
+            elif name == "query_knowledge_graph":
+                from knowledge_graph_engine import get_knowledge_graph
+                res = get_knowledge_graph().query_graph_context(args.get("query", ""))
+            elif name == "deep_research_synthesis":
+                from research_mode import run_deep_research
+                rep = run_deep_research(args.get("topic", ""))
+                res = {
+                    "topic": rep.topic,
+                    "summary": rep.executive_summary,
+                    "findings": rep.key_findings,
+                    "consensus": rep.cross_source_consensus,
+                    "citations": [{"id": c.citation_id, "title": c.source_title, "url": c.source_url} for c in rep.citations]
+                }
+            elif name == "get_evaluation_diagnostics":
+                from evaluation_engine import get_evaluation_engine
+                res = get_evaluation_engine().get_dashboard_metrics()
             else:
                 return json.dumps({
                     "jsonrpc": "2.0",
