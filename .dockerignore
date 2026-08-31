@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# Python cache & virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.pytest_cache/
+
+# Node & Frontend
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+
+# Logs & Temporary files
+*.log
+output.txt
+regression_results.json
