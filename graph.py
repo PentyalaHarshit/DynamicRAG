@@ -103,6 +103,7 @@ from llm_client import call_llm
 from weather_api import get_weather
 from finance_api import get_stock_quote
 from travel_api import get_travel_info
+from sports_api import get_sports_data
 from agents.search_tool import google_search
 from problem_analyzer import analyze_problem
 from rl_strategy_selector import select_next_strategy, select_strategy
@@ -963,6 +964,71 @@ def node_finance(state: AgentState) -> AgentState:
             "error": answer,
             "funnel_meta": {},
             "top_sentences": [],
+        }
+
+
+def node_sports(state: AgentState) -> AgentState:
+    """Sports Agent Node: Calls TheSportsDB free API to resolve sports queries.
+
+    Handles: who won [tournament] [year], live scores, champion lookups,
+    match results for IPL, FIFA, NBA, NFL, cricket, football, tennis, etc.
+    """
+    question = state["question"]
+    try:
+        sports_res = get_sports_data(question)
+        answer = sports_res["answer"]
+        winner = sports_res.get("winner")
+        print(
+            f"[Graph] Sports Agent: winner={winner!r} | "
+            f"events={len(sports_res.get('events', []))}"
+        )
+        return {
+            "route": "sports",
+            "route_meta": {
+                "api": "thesportsdb",
+                "winner": winner,
+                "parsed": sports_res.get("parsed", {}),
+            },
+            "sports_data": sports_res,
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 1.0 if winner else 0.8,
+            "verification_dimensions": {
+                "retrieved_context_has_answer": True,
+                "answer_contains_entity": bool(winner),
+                "user_question_answered": bool(answer),
+                "hallucination": False,
+            },
+            "passed": True,
+            "answer_found": bool(answer),
+            "generation_blocked": False,
+            "funnel_meta": {"sports_data": sports_res},
+            "top_sentences": [answer],
+            "sac_reward": 2.0 if winner else 1.0,
+            "attempt_count": 1,
+            "failed_strategies": [],
+            "failure_type": "none",
+        }
+    except Exception as exc:
+        answer = f"I could not retrieve sports data for your query: {exc}"
+        print(f"[Graph] Sports Agent error: {exc}")
+        return {
+            "route": "sports",
+            "direct_answer": answer,
+            "final_answer": answer,
+            "final_score": 0.0,
+            "passed": False,
+            "answer_found": False,
+            "generation_blocked": False,
+            "error": str(exc),
+            "funnel_meta": {},
+            "top_sentences": [],
+            "verification_dimensions": {
+                "retrieved_context_has_answer": False,
+                "answer_contains_entity": False,
+                "user_question_answered": False,
+                "hallucination": False,
+            },
         }
 
 
@@ -1885,6 +1951,9 @@ def route_after_intent_and_memory(state: AgentState) -> str:
     if intent_type == "CURRENCY":
         print("[Graph] Router -> currency (live exchange rate API)")
         return "currency"
+    if intent_type == "SPORTS":
+        print("[Graph] Router -> sports (TheSportsDB sports results API)")
+        return "sports"
     if intent_type == "TRAVEL":
         print("[Graph] Router -> travel (live travel & flight API)")
         return "travel"
@@ -2086,6 +2155,7 @@ def build_graph() -> StateGraph:
     graph.add_node("weather",          node_weather)
     graph.add_node("finance",          node_finance)
     graph.add_node("currency",         node_currency)
+    graph.add_node("sports",           node_sports)
     graph.add_node("travel",           node_travel)
     graph.add_node("tourism",          node_tourism)
     graph.add_node("ranking_agent",    node_ranking_agent)
@@ -2125,6 +2195,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("weather",       "sac_reward")
     graph.add_edge("finance",       "sac_reward")
     graph.add_edge("currency",      "sac_reward")
+    graph.add_edge("sports",        "sac_reward")
     graph.add_edge("travel",        "sac_reward")
     graph.add_edge("tourism",       "sac_reward")
     graph.add_edge("ranking_agent", "sac_reward")
@@ -2152,6 +2223,7 @@ def build_graph() -> StateGraph:
             "weather":          "weather",
             "finance":          "finance",
             "currency":         "currency",
+            "sports":           "sports",
             "travel":           "travel",
             "tourism":          "tourism",
             "ranking_agent":    "ranking_agent",

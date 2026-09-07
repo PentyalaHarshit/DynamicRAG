@@ -303,9 +303,43 @@ _FACTOID_RE = re.compile(
 )
 
 
+# ── SPORTS ──────────────────────────────────────────────────────────────────
+# Catches: "who won IPL 2020", "FIFA World Cup champion", "NBA finals winner",
+#          "cricket score", "football match result", "which team won", etc.
+# MUST fire BEFORE _CURRENT_FACT_RE to prevent year-containing sports queries
+# being misrouted to generic web_rag instead of the dedicated Sports Agent.
+_SPORTS_RE = re.compile(
+    r'\b('
+    # Tournament winner queries
+    r'who\s+won\s+(the\s+)?(?:ipl|cricket|football|soccer|basketball|tennis|'
+    r'rugby|hockey|baseball|nba|nfl|mlb|nhl|f1|formula\s*1|'
+    r'world\s+cup|premier\s+league|champions\s+league|la\s+liga|'
+    r'bundesliga|series\s*[a-z]?|grand\s+slam|wimbledon|us\s+open|'
+    r'australian\s+open|french\s+open|super\s+bowl|stanley\s+cup|'
+    r'icc|bbl|psl|cpl|big\s+bash)'
+    r'|'
+    # Direct league/tournament name matches
+    r'(?:ipl|indian\s+premier\s+league)\s+(?:winner|champion|final|\d{4})'
+    r'|'
+    r'(?:nba|nfl|mlb|nhl|fifa|icc|f1|formula\s*1)\s+(?:winner|champion|final|\d{4}|season|standings)'
+    r'|'
+    r'(?:world\s+cup|champions\s+league|premier\s+league|super\s+bowl|'
+    r'stanley\s+cup|grand\s+slam|wimbledon)\s+(?:winner|champion|\d{4})'
+    r'|'
+    # Winner/champion phrasing
+    r'(?:winner|champion|champions)\s+of\s+(?:ipl|cricket|nba|nfl|mlb|fifa|world\s+cup)'
+    r'|'
+    r'(?:cricket|football|soccer|basketball|tennis|rugby)\s+(?:score|result|match|game|fixture)'
+    r'|'
+    r'which\s+team\s+won|who\s+is\s+the\s+(?:current\s+)?(?:ipl|nba|nfl|fifa|world\s+cup)\s+(?:champion|winner)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+
 # ── MILITARY / HISTORICAL CONFLICT ─────────────────────────────────────────
 # Key action words: "battles", "wars", "wars won", "military conflicts", "defeated"
-# MUST fire BEFORE _SPORTS_RE to prevent "battles" being miscategorised as SPORTS.
+# MUST fire AFTER _SPORTS_RE to prevent sports queries being miscategorised.
 _MILITARY_HISTORY_RE = re.compile(
     r'\b('
     r'battle|battles|war|wars|conflict|conflicts|military|'
@@ -322,6 +356,7 @@ _MILITARY_HISTORY_RE = re.compile(
 # ---------------------------------------------------------------------------
 _ROUTING: dict = {
     "QUIZ":             (True,  0.99),  # Quiz Agent — MCQ with option parsing & DQN selection
+    "SPORTS":           (True,  0.97),  # Sports Agent — TheSportsDB API for results & winners
     "MILITARY_HISTORY": (True,  0.96),  # Historical Conflict Agent — needs web/historical sources
     "CURRENCY":         (True,  0.99),  # live exchange rate — always web
     "WEATHER":         (True,  0.98),
@@ -344,12 +379,15 @@ _ROUTING: dict = {
 # ---------------------------------------------------------------------------
 INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augmented generation (RAG) system.
 
-    Classify the user query into EXACTLY ONE of these 13 intent types:
+    Classify the user query into EXACTLY ONE of these 14 intent types:
 
     CURRENCY        — currency conversion or live exchange rate queries.
                        Examples: "100 USD in INR", "convert 50 EUR to GBP", "USD to INR rate"
     WEATHER         — current weather or forecast for a named location.
     FINANCE         — current stock price or market quote for a company/ticker.
+    SPORTS          — sports results, winners, champions, scores, standings for any league or tournament.
+                       Examples: "Who won IPL 2020?", "FIFA World Cup 2022 winner", "NBA Finals 2023 champion",
+                                 "cricket score today", "which team won the Super Bowl?"
     TRAVEL          — flight availability, ticket prices, airline options, hotel bookings, travel itineraries.
                        Examples: "Is there flight from Dallas to Hyderabad on 2nd september?", "cheapest flights to Tokyo"
   CURRENT_FACT    — who currently holds a role, live/recent data, incumbent
@@ -376,6 +414,7 @@ INTENT_SYSTEM_PROMPT = """You are an NLP Intent Classifier for a retrieval-augme
                     Examples: "Why did Rome fall?", "What would happen if the sun disappeared?"
 
 Rules:
+    - SPORTS takes highest priority for any question about sports results, winners, scores, or champions.
     - WEATHER takes priority over CURRENT_FACT and CODING for weather lookups.
     - FINANCE takes priority over CURRENT_FACT and CODING for market lookups.
     - TRAVEL takes priority over DEFINITION, FACTOID, and CURRENT_FACT for travel/flight lookups.
@@ -384,7 +423,7 @@ Rules:
   - HISTORICAL_FACT takes priority over BIOGRAPHY when the question is about an event, not a person.
   - DEFINITION takes priority over FACTOID for "what is [concept]" queries.
   - CODING takes priority over REASONING for implementation questions.
-    - needs_web = true for WEATHER, FINANCE, CURRENCY, TRAVEL, and CURRENT_FACT.
+    - needs_web = true for WEATHER, FINANCE, CURRENCY, TRAVEL, SPORTS, and CURRENT_FACT.
 
 Respond ONLY with valid JSON — no markdown, no explanation:
 {
@@ -421,6 +460,19 @@ def _heuristic_intent(query: str) -> IntentResult | None:
         )
 
     words = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 2]
+    # ── SPORTS: "who won IPL", "NBA champion", "cricket score", etc. ──────────
+    # Checked BEFORE MILITARY_HISTORY and CURRENT_FACT so sports queries with
+    # year markers (e.g. "who won IPL 2020") go to the Sports Agent, not web_rag.
+    if _SPORTS_RE.search(query):
+        needs_web, conf = _ROUTING["SPORTS"]
+        return IntentResult(
+            intent_type="SPORTS",
+            needs_web=needs_web,
+            confidence=conf,
+            keywords=words,
+            reasoning="Heuristic: query asks for sports result, winner, champion, or score.",
+        )
+
     # ── MILITARY_HISTORY: "battles" / "wars" / "conflict" ──────────────────
     if _MILITARY_HISTORY_RE.search(query):
         needs_web, conf = _ROUTING["MILITARY_HISTORY"]

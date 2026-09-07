@@ -233,6 +233,15 @@ def generate_answer(question: str, context: str, correction_feedback: str = "") 
     q_lower = question_clean.lower()
     is_biography = q_lower.startswith(("who is ", "who are ", "who was ", "who were "))
 
+    # Detect "who won / winner / champion / which team won" sport/tournament questions
+    _WINNER_RE = re.compile(
+        r'\b(who\s+won|who\s+win|which\s+team\s+won|who\s+is\s+the\s+(winner|champion)|'
+        r'winner\s+of|champion\s+of|champions?\s+of|won\s+the|'
+        r'ipl\s+winner|world\s+cup\s+winner|nba\s+champion|fifa\s+champion)\b',
+        re.IGNORECASE,
+    )
+    is_winner_question = bool(_WINNER_RE.search(question_clean))
+
     from answer_style_detector import detect_answer_style
     style_spec = detect_answer_style(question_clean)
 
@@ -265,6 +274,14 @@ def generate_answer(question: str, context: str, correction_feedback: str = "") 
         prompt += (
             f"\n\nYour previous answer had a quality issue: {correction_feedback}"
             "\nPlease correct it thoroughly."
+        )
+    elif is_winner_question:
+        prompt += (
+            "\n\nIMPORTANT: This question asks who won a tournament, match, or championship. "
+            "Your answer MUST start by clearly stating the winning team or player name. "
+            "Format: '[Winning Team/Player Name] won the [Tournament/Event] [Year].' "
+            "Then you may add brief context (score, venue, opponent). "
+            "Do NOT start with background context or a description of the match — lead with the WINNER."
         )
     elif is_biography:
         prompt += (

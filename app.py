@@ -129,6 +129,7 @@ def execute_query(req: QueryRequest):
             "operation":         res.get("operation", None),
             "time_scope":        res.get("time_scope", None),
             "data_source":       res.get("data_source", None),
+            "sports_data":       res.get("sports_data", None),
             "verification": {
                 "score": res.get("final_score", 1.0),
                 "dimensions": res.get("verification_dimensions", {}),
