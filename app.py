@@ -36,9 +36,9 @@ app.add_middleware(
 )
 
 FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
-
-if (FRONTEND_DIST / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+assets_dir = FRONTEND_DIST / "assets"
+assets_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
 
 @app.get("/")
@@ -53,6 +53,22 @@ def read_root():
         "docs": "/docs",
         "health": "/api/health"
     }
+
+
+@app.get("/favicon.svg")
+def read_favicon():
+    fav = FRONTEND_DIST / "favicon.svg"
+    if fav.exists():
+        return FileResponse(str(fav))
+    raise HTTPException(status_code=404)
+
+
+@app.get("/icons.svg")
+def read_icons():
+    icons = FRONTEND_DIST / "icons.svg"
+    if icons.exists():
+        return FileResponse(str(icons))
+    raise HTTPException(status_code=404)
 
 
 class QueryRequest(BaseModel):
